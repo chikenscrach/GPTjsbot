@@ -25,8 +25,23 @@ for (const file of commandFiles) {
 
 // Bot 啟動事件
 client.once('ready', () => {
-  console.log(`🤖 Bot 上線：${client.user.tag}`);
+	console.log(`✅ 已登入：${client.user.tag}`);
+
+	client.user.setPresence({
+		status: process.env.BOT_STATUS || 'online',
+		activities: [{
+			type: {
+				playing: 0,
+				streaming: 1,
+				listening: 2,
+				watching: 3,
+				competing: 5
+			}[process.env.BOT_ACTIVITY_TYPE] ?? 0,
+			name: process.env.BOT_ACTIVITY_NAME || '使用 /help'
+		}]
+	});
 });
+
 
 // Slash 指令事件
 client.on('interactionCreate', async interaction => {
