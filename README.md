@@ -15,6 +15,9 @@ npm install
 ```env
 DISCORD_TOKEN=你的 Discord Bot Token
 CLIENT_ID=你的 Discord App Client ID
+BOT_OWNER_ID=你的 Discord 使用者 ID
+BOT_STATUS=online|idle|dnd
+BOT_ACTIVITY=你想顯示的活動狀態文字
 ```
 
 或參考 `.env.sample` 範本檔案。
@@ -37,16 +40,20 @@ node index.js
 
 ```
 GPTjsbot/
-├── core/               # 核心功能模組
+├── core/                     # 核心功能模組
 │   └── deploy-commands.js
-├── commands/           # Slash 指令模組
+├── commands/                 # Slash 指令模組
+│   ├── avatar.js
+│   ├── info.js
 │   ├── ping.js
-│   └── info.js
-├── .env                # 環境變數（請勿上傳）
-├── .env.sample         # 環境變數參考範例
+│   ├── reminder.js
+│   └── status.js
+├── .env                      # 環境變數（請勿上傳）
+├── .env.sample               # 環境變數參考範例
 ├── .gitignore
-├── index.js            # Bot 入口主程式
+├── index.js                  # Bot 入口主程式
 ├── package.json
+└── README.md
 ```
 
 ## ⚠️ 注意事項
