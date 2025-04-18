@@ -1,13 +1,16 @@
-# Node.js
+# ❌ 忽略 node 模組
 node_modules/
+
+# ❌ 忽略環境設定
 .env
 .env.*.local
+
+# ❌ 忽略 SQLite 資料庫
+data/*.db
+
+# ❌ 忽略 macOS / Windows 系統檔案
 .DS_Store
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# OS
 Thumbs.db
+
+# ❌ 忽略 log 檔案
+npm-debug.log*

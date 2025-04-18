@@ -1,10 +1,16 @@
 require('dotenv').config();
+require('./core/db'); // 順便初始化 DB
 const fs = require('fs');
 const path = require('path');
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
+const { startScheduler } = require('./core/scheduler');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+	GatewayIntentBits.Guilds,
+	GatewayIntentBits.GuildMessages,
+	GatewayIntentBits.MessageContent
+  ],
 });
 
 client.commands = new Collection();
@@ -23,9 +29,23 @@ for (const file of commandFiles) {
   }
 }
 
+const eventsPath = path.join(__dirname, 'events');
+const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith('.js'));
+
+for (const file of eventFiles) {
+	const filePath = path.join(eventsPath, file);
+	const event = require(filePath);
+	if (event.once) {
+		client.once(event.name, (...args) => event.execute(...args));
+	} else {
+		client.on(event.name, (...args) => event.execute(...args));
+	}
+}
+
 // Bot 啟動事件
 client.once('ready', () => {
 	console.log(`✅ 已登入：${client.user.tag}`);
+	startScheduler(client);
 
 	client.user.setPresence({
 		status: process.env.BOT_STATUS || 'online',
