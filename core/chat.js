@@ -1,15 +1,15 @@
-const OpenAI = require("openai");
+const Groq = require("groq-sdk");
 const dotenv = require("dotenv");
 
 dotenv.config();
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
 });
 
-async function getChatResponse(userMessage, model = "gpt-3.5-turbo") {
+async function getChatResponse(userMessage, model = "groq/compound") {
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await groq.chat.completions.create({
       model,
       messages: [
         {
@@ -21,7 +21,7 @@ async function getChatResponse(userMessage, model = "gpt-3.5-turbo") {
 
     return completion.choices[0]?.message?.content || "我沒有回應喔。";
   } catch (error) {
-    console.error("OpenAI 回應錯誤：", error);
+    console.error("Groq 回應錯誤：", error);
     return "抱歉，請求出錯了！";
   }
 }

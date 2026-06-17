@@ -35,7 +35,7 @@ BOT_STATUS=online
 BOT_ACTIVITY_TYPE=Playing
 BOT_ACTIVITY_NAME=GPTjsbot | /help
 
-OPENAI_API_KEY=你的 OpenAI API Key
+GROQ_API_KEY=你的 Groq API Key
 ```
 
 可參考 `.env.sample` 範本檔案。
@@ -119,20 +119,14 @@ GPTjsbot/
 - `/info` 查詢使用者或伺服器資訊
 - `/status` 機器人上線狀況（診斷記憶體、運行時間等）
 - `/reminder` 設定提醒，可選頻道或私訊
-- `/chat` 與 ChatGPT 對話（支援模型選擇） [→ 請看 ChatGPT 對話區段](#-聊天-chatgpt-對話chat)
+- `/chat` 與 AI 對話 [→ 請看 AI 對話區段](#-聊天-ai-對話chat)
 - `/help` 顯示目前可用指令
 
 ---
 
-### 💬 聊天 ChatGPT 對話（/chat）
+### 💬 聊天 AI 對話（/chat）
 
-支援模型選擇：
-
-- `gpt-4o`
-- `gpt-4o-mini`
-- `gpt-3.5-turbo` (預設)
-
-使用 OpenAI API 後端連線，不必登入。
+使用 Groq API 後端連線，不必登入。預設模型為 `groq/compound`。
 
 ---
 
@@ -142,13 +136,14 @@ GPTjsbot/
 
 | 原始網址              | 轉換網址           |
 |----------------------|--------------------|
-| `x.com` / `twitter.com` | `girlcockx.com`   |
+| `x.com` / `twitter.com` | `fixvx.com`       |
 | `pixiv.net`          | `phixiv.net`       |
 | `tiktok.com`         | `tnktok.com`       |
-| `instagram.com`      | `ddinstagram.com`  |
-| `threads.net`        | `fixthreads.net`   |
+| `instagram.com`      | `kkinstagram.com`  |
 | `bsky.app`           | `fxbsky.app`       |
-| `youtube.com` / `youtu.be` | `https://youtu.be/{id}` |
+| `bilibili.com`       | `vxbilibili.com`   |
+| `b23.tv`             | `vxb23.tv`         |
+| `youtube.com` / `youtu.be` | `https://youtu.be/{id}` (已是 short link 則跳過) |
 
 ✅ 僅處理人類使用者發送的訊息，無視其他機器人發送。
 

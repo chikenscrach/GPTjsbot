@@ -13,9 +13,10 @@ module.exports = {
 		const replacements = {
 			'pixiv.net': 'phixiv.net',
 			'tiktok.com': 'tnktok.com',
-			'instagram.com': 'ddinstagram.com',
-			'threads.net': 'fixthreads.net',
+			'instagram.com': 'kkinstagram.com',
 			'bsky.app': 'fxbsky.app',
+			'bilibili.com': 'vxbilibili.com',
+			'b23.tv': 'vxb23.tv',
 		};
 
 		const converted = [];
@@ -32,7 +33,7 @@ module.exports = {
 
 			// 完全符合 x.com / twitter.com 才處理
 			if (parsedDomain === 'x.com' || parsedDomain === 'twitter.com') {
-				const newUrl = url.replace(/^(https?:\/\/)(www\.)?(x|twitter)\.com/, '$1girlcockx.com').split('?')[0];
+				const newUrl = url.replace(/^(https?:\/\/)(www\.)?(x|twitter)\.com/, '$1fixvx.com').split('?')[0];
 				if (newUrl !== url) {
 					converted.push(newUrl);
 					shouldSuppressAndReply = true;
@@ -41,12 +42,14 @@ module.exports = {
 			}
 
 			// 處理 YouTube 影片
+			// 如果網址已經是理想的 youtu.be 短網址格式，直接跳過不做任何處理
+			if (/^https?:\/\/youtu\.be\/[a-zA-Z0-9_-]{11}$/.test(url.trim())) {
+				continue;
+			}
 			const yt = extractYouTubeIdFromUrl(url);
 			if (yt) {
-				if (url.trim() !== yt) {
-					converted.push(yt);
-					shouldSuppressAndReply = true;
-				}
+				converted.push(yt);
+				shouldSuppressAndReply = true;
 				continue;
 			}
 
@@ -54,7 +57,8 @@ module.exports = {
 			let replaced = null;
 			for (const [domain, replacement] of Object.entries(replacements)) {
 				if (parsedDomain === domain) {
-					replaced = url.replace(domain, replacement).split('?')[0];
+					const regex = new RegExp(`(https?:\\/\\/)(www\\.)?${domain.replace(/\\./g, '\\\\.')}`, 'i');
+					replaced = url.replace(regex, `$1${replacement}`).split('?')[0];
 					break;
 				}
 			}
