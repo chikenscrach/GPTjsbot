@@ -53,6 +53,24 @@ module.exports = {
 				continue;
 			}
 
+			// 處理 Threads 官方網址（移除 www 及 URL tracker）
+			if (parsedDomain === 'threads.com') {
+				try {
+					const parsed = new URL(url);
+			
+					const newUrl = `https://threads.com${parsed.pathname}`;
+			
+					if (newUrl !== url) {
+						converted.push(newUrl);
+						shouldSuppressAndReply = true;
+					}
+			
+					continue;
+				} catch {
+					continue;
+				}
+			}
+
 			// 處理其他平台
 			let replaced = null;
 			for (const [domain, replacement] of Object.entries(replacements)) {
