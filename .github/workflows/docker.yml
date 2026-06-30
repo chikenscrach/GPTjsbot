@@ -27,7 +27,18 @@ jobs:
 
       - name: Set repository name (lowercase)
         id: repo_name
-        run: echo "REPO_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        run: echo "REPO_NAME=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        env:
+          REPO: ${{ github.repository }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.REPO_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -35,6 +46,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ env.REPO_NAME }}:latest
-            ghcr.io/${{ env.REPO_NAME }}:${{ github.ref_name }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

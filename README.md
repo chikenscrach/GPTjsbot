@@ -42,23 +42,25 @@ GROQ_API_KEY=你的 Groq API Key
 
 ---
 
-## 🚀 註冊 Slash 指令
+## 🚀 部署與執行
+
+### 1. 註冊 Slash 指令
+
+首次啟動或有新增指令時，請先執行以下指令註冊（會自動讀取 `commands/` 資料夾內的 `.js` 檔案）：
 
 ```bash
 node core/deploy-commands.js
 ```
 
-會自動讀取 `commands/` 資料夾內的 `.js` 檔案。
+### 2. 啟動機器人
 
----
-
-## 🧪 啟動機器人
+直接使用 Node.js 執行：
 
 ```bash
 node index.js
 ```
 
-或使用 Docker：
+或使用 Docker 執行：
 
 ```bash
 docker run -d \
@@ -66,8 +68,6 @@ docker run -d \
   --env-file .env \
   ghcr.io/chikenscrach/gptjsbot:latest
 ```
-
-請確保載入正確的 `.env` 環境設定。
 
 ---
 
@@ -93,8 +93,16 @@ GPTjsbot/
 ├── events/
 │   └── messageCreate.js    # 訊息網址自動轉換
 │
-├── utils/
+├── handlers/               # 網址解析與處理模組
+│   ├── facebook.js         # 解析 Facebook 網址與多圖貼文
+│   ├── index.js            # 集中匯出各類網址處理器
+│   ├── simple.js           # 簡單網址替換 (Pixiv, IG, Bilibili 等)
+│   ├── threads.js          # 清理 Threads 網址 (移除參數與 www)
+│   ├── twitter.js          # 處理 Twitter / X 網址
 │   └── youtube.js          # 解析 YouTube 網址為 short link
+│
+├── utils/
+│   └── youtube.js          # (舊有) 解析 YouTube 網址相關工具
 │
 ├── data/
 │   └── bot.db              # SQLite 資料庫
@@ -119,14 +127,8 @@ GPTjsbot/
 - `/info` 查詢使用者或伺服器資訊
 - `/status` 機器人上線狀況（診斷記憶體、運行時間等）
 - `/reminder` 設定提醒，可選頻道或私訊
-- `/chat` 與 AI 對話 [→ 請看 AI 對話區段](#-聊天-ai-對話chat)
+- `/chat` 與 AI 對話（使用 Groq API，無須登入。預設模型：`groq/compound`）
 - `/help` 顯示目前可用指令
-
----
-
-### 💬 聊天 AI 對話（/chat）
-
-使用 Groq API 後端連線，不必登入。預設模型為 `groq/compound`。
 
 ---
 
@@ -143,6 +145,8 @@ GPTjsbot/
 | `bsky.app`           | `fxbsky.app`       |
 | `bilibili.com`       | `vxbilibili.com`   |
 | `b23.tv`             | `vxb23.tv`         |
+| `threads.net` / `threads.com` | `threads.com` (移除追蹤參數與 `www.`) |
+| `facebook.com` / `fb.com` / `fb.watch` | `facebed.com` (追蹤真實主文 ID 並清理) |
 | `youtube.com` / `youtu.be` | `https://youtu.be/{id}` (已是 short link 則跳過) |
 
 ✅ 僅處理人類使用者發送的訊息，無視其他機器人發送。
@@ -152,14 +156,7 @@ GPTjsbot/
 ## ⚠️ 注意事項
 
 - 使用 Discord.js v14 或更新版。
-- `.env` 請勿上傳，仅保留 `.env.sample`。
-- 如出現下列警告，表示已經棄用寫法：
-
-  ```
-  Warning: Supplying "fetchReply" ... is deprecated
-  Warning: Supplying "ephemeral" ... is deprecated
-  ```
-  → 請改用 `interaction.fetchReply()` 與 `flags: InteractionResponseFlags.Ephemeral`
+- `.env` 請勿上傳，僅保留 `.env.sample`。
 
 ---
 
