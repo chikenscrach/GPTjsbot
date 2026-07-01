@@ -1,5 +1,10 @@
 node_modules
 .env
-data/*.db
+data/
 .git
+.github
+.gitignore
+.dockerignore
 *.log
+npm-debug.log
+*.md

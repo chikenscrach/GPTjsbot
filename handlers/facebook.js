@@ -1,83 +1,141 @@
 // handlers/facebook.js
-// 基於 fb.py 的完整邏輯，解析 Facebook 短網址為真實主文網址，並替換為 facebed.com 供 Discord 預覽
+// 基於 fb.js 整合版邏輯，解析 Facebook 短網址為真實主文網址，並替換為 facebed.com 供 Discord 預覽
+
+/**
+ * 用 plugins/post.php 外嵌還原「相片所屬的母貼文」
+ * 使用爬蟲 UA，抽取 ?ref=embed_post 連結
+ */
+async function fetchEmbed(href, headers) {
+	const url = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
+	const r = await fetch(url, { headers });
+	const html = await r.text();
+	if (r.status !== 200 || html.length < 3000) return null;
+
+	// 母貼文標準連結：<a href="/{owner}/posts/{id}?ref=embed_post">
+	const m = html.match(/href="\/([^"?]+\/posts\/\d+)\?ref=embed_post"/i)
+		|| html.match(/facebook\.com\/([^"'\\?]+\/posts\/\d+)\?ref=embed_post/i);
+
+	if (m) {
+		return `https://www.facebook.com/${m[1]}`;
+	}
+	return null;
+}
+
+const decodeEntities = (s) => s == null ? s : s
+	.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+	.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+	.replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+	.replace(/&#039;|&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
 module.exports = {
 	name: 'facebook',
 
 	match(hostname) {
-		return ['facebook.com', 'fb.com', 'fb.watch', 'www.facebook.com'].includes(hostname);
+		return ['facebook.com', 'fb.com', 'fb.watch'].includes(hostname);
 	},
 
 	async resolve(url) {
 		try {
 			const headers = {
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+				'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+				'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
 			};
 
-			// 跟隨重導向
-			const redirectResp = await fetch(url, { headers, redirect: 'follow' });
-			let targetUrl = redirectResp.url;
-			let urlObj = new URL(targetUrl);
+			// ---- Phase 1：追蹤重導向 ----
+			const resp = await fetch(url, { headers, redirect: 'follow' });
+			const html = await resp.text();
+			let finalUrl = resp.url;
+			let urlObj = new URL(finalUrl);
 
-			// 檢查登入攔截
+			// 破解 login 攔截，取 next 參數裡真正的跳轉網址
+			let loginWalled = false;
 			if (urlObj.pathname.includes('/login')) {
+				loginWalled = true;
 				const nextParam = urlObj.searchParams.get('next');
 				if (nextParam) {
-					targetUrl = nextParam;
-					urlObj = new URL(targetUrl);
+					finalUrl = nextParam;
+					urlObj = new URL(finalUrl);
 				}
 			}
 
-			// 清除追蹤碼，但保留 set 等結構參數
-			const paramsToRemove = ['rdid', 'share_url', 'fbclid', 'mibextid'];
-			for (const param of paramsToRemove) {
-				urlObj.searchParams.delete(param);
-			}
+			// 清洗追蹤參數
+			['rdid', 'share_url', 'fbclid', 'mibextid'].forEach(p => urlObj.searchParams.delete(p));
+			const cleanUrl = urlObj.href;
 
-			const setParam = urlObj.searchParams.get('set');
-			const pathname = urlObj.pathname;
-			let finalFbUrl = null;
+			// ---- Phase 2：從 meta 標籤解析（未被擋登入時最完整）----
+			const pick = (re) => { const m = html.match(re); return m ? decodeEntities(m[1]) : null; };
+			let canonicalUrl =
+				pick(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i) ||
+				pick(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i);
+			// login 頁的 canonical 會是 .../login，視為無效
+			if (canonicalUrl && /\/login\/?$/.test(canonicalUrl)) canonicalUrl = null;
+			// 若 canonicalUrl 是單張相片，清空它以強制走 fallback 取母貼文 (post)
+			if (canonicalUrl && canonicalUrl.includes('/photos/')) canonicalUrl = null;
 
-			// 【Phase 2】檢查是否為多圖貼文 (pcb.XXXX)
-			if (setParam && setParam.startsWith('pcb.')) {
-				const parentPostId = setParam.replace('pcb.', '');
-				const parts = pathname.split('/').filter(Boolean);
-				finalFbUrl = `https://www.facebook.com/${parts[0]}/posts/${parentPostId}`;
-			} else {
-				// 【Phase 3】透過 post.php 解密 pfbid 或將單圖解析為真實數字 ID 主文
-				const cleanUrl = urlObj.toString();
-				const postPhpUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(cleanUrl)}&show_text=true&width=500`;
-				
-				const embedResp = await fetch(postPhpUrl, { headers });
-				const html = await embedResp.text();
+			let resultUrl = null;
 
-				// 尋找 查看更多 (see_more_link) 或 發文時間戳 (_2q21)
-				// 使用 Regex 匹配 <a class="... see_more_link ..." href="...">
-				const regex = /<a[^>]+class="[^"]*(?:see_more_link|_2q21)[^"]*"[^>]+href="([^"]+)"/;
-				const match = html.match(regex);
+			if (canonicalUrl) {
+				// ---- 有 canonical：一般貼文（粉專 / 群組）----
+				const idMatch = canonicalUrl.match(/\/(?:posts|permalink|videos)\/(?:[^/]*\/)?(\d{6,})\/?$/)
+					|| canonicalUrl.match(/\/(?:posts|permalink|videos)\/(\d{6,})/);
+				const postId = idMatch && idMatch[1];
 
-				if (match && match[1]) {
-					// 處理 HTML entities
-					let extractedPath = match[1].replace(/&amp;/g, '&');
-					if (extractedPath.startsWith('/')) {
-						finalFbUrl = `https://www.facebook.com${extractedPath}`;
+				// 群組貼文格式轉換：/groups/{id}/posts/{id} → /groups/{id}/permalink/{id}
+				const g = canonicalUrl.match(/\/groups\/(\d+)\/posts\/(\d+)/);
+				if (g) {
+					resultUrl = `https://www.facebook.com/groups/${g[1]}/permalink/${g[2]}`;
+				} else {
+					const page = canonicalUrl.match(/facebook\.com\/([^/]+)\/posts\//);
+					if (page && postId) {
+						resultUrl = `https://www.facebook.com/${page[1]}/posts/${postId}`;
 					} else {
-						finalFbUrl = extractedPath;
+						resultUrl = canonicalUrl;
+					}
+				}
+			} else {
+				// ---- Fallback：被 login 擋住（多半是「相片」連結）----
+				const fbid = urlObj.searchParams.get('fbid');
+				const setParam = urlObj.searchParams.get('set');
+
+				if (fbid || urlObj.pathname.includes('/photo')) {
+					// 若 set=pcb.<母貼文id>，直接由 set 還原母貼文
+					if (setParam && setParam.startsWith('pcb.')) {
+						const parentId = setParam.replace('pcb.', '');
+						const parts = urlObj.pathname.split('/').filter(Boolean);
+						const owner = parts[0] && parts[0] !== 'photo.php' ? parts[0] : null;
+						if (owner) {
+							resultUrl = `https://www.facebook.com/${owner}/posts/${parentId}`;
+						}
+					}
+
+					// 嘗試用 post.php 外嵌取得母貼文
+					if (!resultUrl) {
+						try {
+							const embedResult = await fetchEmbed(cleanUrl, headers);
+							if (embedResult) {
+								resultUrl = embedResult;
+							}
+						} catch {}
+					}
+
+					// 最終備援：返回相片頁乾淨網址
+					if (!resultUrl) {
+						resultUrl = `https://www.facebook.com/photo.php?fbid=${fbid}${setParam ? '&set=' + setParam : ''}&type=3`;
 					}
 				} else {
-					// 【Fallback 機制】若解算失敗，直接使用 Phase 1 的乾淨網址
-					finalFbUrl = cleanUrl;
+					// 最後備援：story_fbid / 路徑末段
+					resultUrl = cleanUrl;
 				}
 			}
 
-			if (finalFbUrl) {
-				const finalObj = new URL(finalFbUrl);
+			if (resultUrl) {
+				const resultObj = new URL(resultUrl);
 				// 轉換為 facebed.com 讓 Discord 可以產生預覽
-				finalObj.hostname = 'facebed.com';
-				// 移除 ref=embed_post 等不需要的追蹤參數
-				finalObj.searchParams.delete('ref');
-				
-				return finalObj.toString() !== url ? finalObj.toString() : null;
+				resultObj.hostname = 'facebed.com';
+				// 移除不需要的追蹤參數
+				resultObj.searchParams.delete('ref');
+
+				return resultObj.toString() !== url ? resultObj.toString() : null;
 			}
 
 			return null;

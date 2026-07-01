@@ -8,7 +8,7 @@
 
 請先安裝以下軟體：
 
-- [Node.js](https://nodejs.org/) v18 或更新版
+- [Node.js](https://nodejs.org/) v20 或更新版
 - [npm](https://www.npmjs.com/) (隨 Node.js 一起安裝)
 - 已創建的 Discord Bot 應用程式 (Application)，帶 Slash Commands 權限
 
@@ -66,8 +66,11 @@ node index.js
 docker run -d \
   --name gptjsbot \
   --env-file .env \
+  -v ./data:/app/data \
   ghcr.io/chikenscrach/gptjsbot:latest
 ```
+
+> 💡 **提示：** 掛載 `-v ./data:/app/data` 是為了讓 SQLite 資料庫持久化，避免容器更新或重啟時資料遺失。請確保宿主機上的 `./data` 資料夾具備正確的讀寫權限。
 
 ---
 
