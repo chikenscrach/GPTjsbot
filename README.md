@@ -1,67 +1,98 @@
 # GPTjsbot 🤖
 
-這是一個使用 Discord.js + Node.js 製作的個人用 Discord Bot。支援 Slash 指令、網址轉換、自訂提醒、聊天與模組化指令管理，軟量易擴充，適合個人使用。
+<p align="center">
+  <img src="https://img.shields.io/badge/Container-GHCR-blue?style=flat-square&logo=github" alt="GHCR">
+  <img src="https://img.shields.io/badge/Node.js->=20.0.0-green?style=flat-square&logo=node.js" alt="Node.js Version">
+  <img src="https://img.shields.io/badge/Discord.js-v14-blue?style=flat-square&logo=discord" alt="Discord.js Version">
+  <img src="https://img.shields.io/badge/Docker-Supported-blue?style=flat-square&logo=docker" alt="Docker">
+  <img src="https://img.shields.io/github/license/chikenscrach/GPTjsbot?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>基於 Discord.js v14 + Node.js 的全能型個人 Discord 機器人。</strong><br>
+  整合 <b>Groq AI 聊天（支援自訂模型）</b>、<b>多平台網址自動修復 (Embed Fixer)</b>、<b>SQLite 提醒系統</b>，並支援 <b>Docker 容器化部署</b>。
+</p>
 
 ---
 
-## 🧪 前置需求
+## 🌟 核心特色
 
-請先安裝以下軟體：
-
-- [Node.js](https://nodejs.org/) v20 或更新版
-- [npm](https://www.npmjs.com/) (隨 Node.js 一起安裝)
-- 已創建的 Discord Bot 應用程式 (Application)，帶 Slash Commands 權限
-
----
-
-## 📦 安裝依賴
-
-```bash
-npm install
-```
+*   🤖 **AI 智慧聊天**：整合 **Groq API**，支援極速的 Llama / Mixtral 等模型對話，內建 SQLite 記憶對話上下文，自動翻譯繁體中文，且**完美支援長訊息自動分段發送**，徹底防範 Discord 2000 字元長度限制。
+*   ⚙️ **可自訂對話模型**：模型不再寫死！開發者可在 `.env` 檔案中設定全域預設模型，使用者也可以直接在 `/chat` 指令的選單中即時切換不同的官方模型（如極速的 Llama 8B、強大的 Llama 3.3 70B、GPT OSS 或是 Qwen3 等官方支援模型）。
+*   🔗 **自動網址轉換 (Embed Fixer)**：當使用者發送特定平台（如 X/Twitter, Instagram, Facebook）網址時，機器人會自動修正為可直接預覽影片/多圖的替代服務網址（例如 `fixvx.com`, `kkinstagram.com` 等）。
+*   ⏰ **輕量化提醒系統**：透過內建的 SQLite 與排程器，隨時設定個人/頻道的定時提醒事項。
+*   🐋 **生產級 Docker 支援**：基於 `node:20-slim` 進行多階段建置 (Multi-stage build)，內建 `tini` 防範殭屍進程，並以非 root 權限 (`appuser`) 安全運行。已自動發佈至 **GitHub Container Registry (GHCR)**。
+*   🧩 **模組化架構**：易於擴充，只需在 `commands/` 或 `handlers/` 目錄新增檔案，即可無痛增加新指令與新網址解析規則。
 
 ---
 
-## ⚙️ 環境設定
+## 🛠️ 前置準備
 
-請建立 `.env` 檔案，並依照下方格式填入：
+### 1. 取得 API 金鑰與 Token
+*   **Discord Bot Token**：請至 [Discord Developer Portal](https://discord.com/developers/applications) 建立 Application 並取得 Token。
+*   **Groq API Key**：請至 [Groq Console](https://console.groq.com/) 免費申請。
 
-```env
-DISCORD_TOKEN=你的 Discord Bot Token
-CLIENT_ID=你的 Discord App Client ID
-BOT_OWNER_ID=你的 Discord 使用者 ID
+### 2. 開啟 Discord Intents ⚠️（重要）
+為了讓機器人能正常接收指令並偵測網址，請務必在 Discord Developer Portal 的 **"Bot"** 分頁中啟用以下權限：
+- [x] **Presence Intent**
+- [x] **Server Members Intent**
+- [x] **Message Content Intent** (若未開啟，網址自動轉換功能將無法讀取訊息內容)
 
-BOT_STATUS=online
-BOT_ACTIVITY_TYPE=Playing
-BOT_ACTIVITY_NAME=GPTjsbot | /help
+---
 
-GROQ_API_KEY=你的 Groq API Key
-```
+## ⚙️ 環境變數設定 (`.env`)
 
-可參考 `.env.sample` 範本檔案。
+請在專案根目錄建立 `.env` 檔案（可參考 `.env.sample`）：
+
+| 變數名稱 | 是否必填 | 說明 | 預設值 / 範例 |
+| :--- | :---: | :--- | :--- |
+| `DISCORD_TOKEN` | **是** | 你的 Discord Bot Token | `MTIzNDU2...` |
+| `CLIENT_ID` | **是** | 你的 Discord Application Client ID | `123456789012345678` |
+| `BOT_OWNER_ID` | **是** | 機器人擁有者的 Discord User ID | `876543210987654321` |
+| `GROQ_API_KEY` | **是** | Groq API Key | `gsk_abc123...` |
+| `GROQ_MODEL` | 否 | AI 聊天預設模型 | `llama-3.3-70b-versatile` |
+| `GROQ_SYSTEM_PROMPT` | 否 | 自訂 AI 的角色設定 (System Prompt) | `你是一位專業且親切的 Discord 智慧助手...` |
+| `BOT_STATUS` | 否 | 機器人狀態 (`online`, `idle`, `dnd`) | `online` |
+| `BOT_ACTIVITY_TYPE` | 否 | 活動類型 (`Playing`, `Watching`, `Listening`) | `Playing` |
+| `BOT_ACTIVITY_NAME` | 否 | 狀態欄顯示文字 | `GPTjsbot | /help` |
 
 ---
 
 ## 🚀 部署與執行
 
-### 1. 註冊 Slash 指令
+您可以選擇使用 Docker 直接拉取官方封裝好的 GHCR 映像檔（最推薦、最快速），或是使用傳統 Node.js 本地部署。
 
-首次啟動或有新增指令時，請先執行以下指令註冊（會自動讀取 `commands/` 資料夾內的 `.js` 檔案）：
+### 方案 A：使用 Docker 部署（推薦 🐳）
 
+本專案已發佈至 **GitHub Container Registry (GHCR)**。您無需自行建置（Build）映像檔，可直接拉取 (Pull) 官方映像檔快速啟動。
+
+#### 1. 拉取 GHCR 映像檔
 ```bash
-node core/deploy-commands.js
+docker pull ghcr.io/chikenscrach/gptjsbot:latest
 ```
 
-### 2. 啟動機器人
+#### 2. 啟動容器
+您可以選擇使用 **Docker Compose**（極力推薦，方便管理）或傳統的 **Docker Run**。
 
-直接使用 Node.js 執行：
-
+##### 💡 方式一：使用 Docker Compose（極佳維護性）
+在根目錄下建立 `docker-compose.yml` 檔案：
+```yaml
+services:
+  gptjsbot:
+    image: ghcr.io/chikenscrach/gptjsbot:latest
+    container_name: gptjsbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+```
+啟動服務：
 ```bash
-node index.js
+docker-compose up -d
 ```
 
-或使用 Docker 執行：
-
+##### 💡 方式二：使用 Docker Run 傳統啟動
 ```bash
 docker run -d \
   --name gptjsbot \
@@ -70,104 +101,119 @@ docker run -d \
   ghcr.io/chikenscrach/gptjsbot:latest
 ```
 
-> 💡 **提示：** 掛載 `-v ./data:/app/data` 是為了讓 SQLite 資料庫持久化，避免容器更新或重啟時資料遺失。請確保宿主機上的 `./data` 資料夾具備正確的讀寫權限。
+> ⚠️ **注意事項：** 
+> * 請務必掛載 `-v ./data:/app/data`，這樣內建的 SQLite 資料庫 (`bot.db`) 在容器升級或重啟時，數據（如對話上下文、提醒設定）才不會遺失。
+> * 請確認宿主機的 `./data` 資料夾具備正確的讀寫權限。
 
 ---
 
-## 📁 專案結構
+### 方案 B：傳統 Node.js 本地部署
 
-```
+1. **安裝依賴套件**
+   ```bash
+   npm install
+   ```
+
+2. **註冊 Slash (斜線) 指令**
+   每當新增、修改指令或首次啟動時，請先執行此步驟：
+   ```bash
+   node core/deploy-commands.js
+   ```
+
+3. **啟動機器人**
+   ```bash
+   node index.js
+   ```
+
+---
+
+## 📁 專案結構說明
+
+```text
 GPTjsbot/
-├── commands/               # Slash 指令模組
-│   ├── avatar.js
-│   ├── chat.js
-│   ├── help.js
-│   ├── info.js
-│   ├── ping.js
-│   ├── reminder.js
-│   └── status.js
-│
-├── core/                   # 核心功能模組
-│   ├── chat.js
-│   ├── db.js
-│   ├── deploy-commands.js
-│   └── scheduler.js
-│
+├── commands/               # Slash 指令模組 (自動讀取)
+│   ├── chat.js             # AI 聊天 (/chat，支援自訂模型選單)
+│   ├── reminder.js         # 設定提醒 (/reminder)
+│   └── ...                 # ping, avatar, info, status, help
+├── core/                   # 核心調度邏輯
+│   ├── chat.js             # Groq API 封裝與可配置模型邏輯
+│   ├── db.js               # SQLite 資料庫初始化
+│   ├── deploy-commands.js  # Discord 斜線指令部署腳本
+│   └── scheduler.js        # 定時提醒任務排程器
 ├── events/
-│   └── messageCreate.js    # 訊息網址自動轉換
-│
-├── handlers/               # 網址解析與處理模組
-│   ├── facebook.js         # 解析 Facebook 網址與多圖貼文
-│   ├── index.js            # 集中匯出各類網址處理器
-│   ├── simple.js           # 簡單網址替換 (Pixiv, IG, Bilibili 等)
-│   ├── threads.js          # 清理 Threads 網址 (移除參數與 www)
-│   ├── twitter.js          # 處理 Twitter / X 網址
-│   └── youtube.js          # 解析 YouTube 網址為 short link
-│
-├── utils/
-│   └── youtube.js          # (舊有) 解析 YouTube 網址相關工具
-│
+│   └── messageCreate.js    # 監聽訊息（負責網址偵測與轉換）
+├── handlers/               # 網址解析與格式修復模組 (Modular Handlers)
+│   ├── facebook.js         # 處理 Facebook 貼文、多圖與小幫手
+│   ├── twitter.js          # 轉換 Twitter / X 連結至 Fixvx
+│   ├── threads.js          # 清理 Threads 網址與追蹤參數
+│   ├── simple.js           # Pixiv, IG, Bilibili 等簡單取代規則
+│   ├── youtube.js          # YouTube 轉簡短網址
+│   └── index.js            # 集中匯出網址處理器
 ├── data/
-│   └── bot.db              # SQLite 資料庫
-│
-├── Dockerfile              # Docker 建立檔
-├── .env                    # 環境設定（請勿上傳）
-├── .env.sample             # 環境設定參考範例
-├── .gitignore
-├── index.js                # Bot 主程式入口
-├── node_modules/
-├── package.json
-└── README.md
+│   └── bot.db              # SQLite 本地資料庫 (自動產生)
+├── Dockerfile              # 多階段、高安全性的 Docker 映像檔建置規則
+├── LICENSE                 # 開源授權條款 (MIT)
+└── index.js                # 專案程式入口點
 ```
 
 ---
 
-## ✨ 功能一覽
+## 📖 功能清單
 
-### 🤖 機器人指令
-- `/ping` 測試延遲
-- `/avatar` 顯示使用者頭像
-- `/info` 查詢使用者或伺服器資訊
-- `/status` 機器人上線狀況（診斷記憶體、運行時間等）
-- `/reminder` 設定提醒，可選頻道或私訊
-- `/chat` 與 AI 對話（使用 Groq API，無須登入。預設模型：`groq/compound`）
-- `/help` 顯示目前可用指令
+### 🤖 斜線指令 (Slash Commands)
+*   `/chat [message] [model]`：與 AI 助手對話。
+    *   `message`：對話內容。
+    *   `model`（選填）：直接在選單中覆寫預設設定，即時選用不同模型（如 Llama 3.3 70B、Llama 3.1 8B、GPT OSS 120B、Qwen 3.6 27B 等）。
+*   `/reminder [time] [message] [channel]`：設定定時提醒，時間格式支援 `10m`、`2h`、`1d` 等。
+*   `/status`：診斷並顯示當前系統狀態（包含記憶體佔用、運行時間與延遲）。
+*   `/ping`：測試機器人與 Discord API 的延遲。
+*   `/avatar [user]`：取得指定使用者的頭像。
+*   `/info`：取得伺服器或使用者詳細資訊。
+*   `/help`：列出所有可用指令。
 
----
+### 🔗 自動網址轉換對照表 (Embed Fixer)
+當一般使用者發送以下平台網址時，機器人會**自動刪除原先失效或難看的預覽**，並改寫為能完美呈現影音預覽的替代連結：
 
-### 🔗 自動網址轉換
-
-偵測訊息中特定網址，自動關閉原 embed，轉成替代網址：
-
-| 原始網址              | 轉換網址           |
-|----------------------|--------------------|
-| `x.com` / `twitter.com` | `fixvx.com`       |
-| `pixiv.net`          | `phixiv.net`       |
-| `tiktok.com`         | `tnktok.com`       |
-| `instagram.com`      | `kkinstagram.com`  |
-| `bsky.app`           | `fxbsky.app`       |
-| `bilibili.com`       | `vxbilibili.com`   |
-| `b23.tv`             | `vxb23.tv`         |
-| `threads.net` / `threads.com` | `threads.com` (移除追蹤參數與 `www.`) |
-| `facebook.com` / `fb.com` / `fb.watch` | `facebed.com` (追蹤真實主文 ID 並清理) |
-| `youtube.com` / `youtu.be` | `https://youtu.be/{id}` (已是 short link 則跳過) |
-
-✅ 僅處理人類使用者發送的訊息，無視其他機器人發送。
+| 原始網址 | 轉換後網址 (修復預覽) | 備註說明 |
+| :--- | :--- | :--- |
+| `x.com` / `twitter.com` | `fixvx.com` | 完美還原 X 影片與多圖預覽 |
+| `pixiv.net` | `phixiv.net` | 解決 Pixiv 圖片無法直接在 Discord 顯示的問題 |
+| `tiktok.com` | `tnktok.com` | 支援 TikTok 影片在 Discord 內直接播放 |
+| `instagram.com` | `kkinstagram.com` | 修正 IG 貼文、Reels 影片無法預覽的問題 |
+| `bsky.app` | `fxbsky.app` | 修正 Bluesky 預覽 |
+| `bilibili.com` / `b23.tv` | `vxbilibili.com` / `vxb23.tv` | 修正 B 站影片預覽 |
+| `threads.net` | `threads.com` | 移除 `www.` 與惱人的 `?xpt=` 追蹤參數 |
+| `facebook.com` / `fb.watch` | `facebed.com` | 自動解析真實貼文 ID，排除登入牆限制 |
+| `youtube.com` | `youtu.be` | 自動標準化為 YouTube 短網址 |
 
 ---
 
-## ⚠️ 注意事項
+## 🛠️ 開發與擴充指南
 
-- 使用 Discord.js v14 或更新版。
-- `.env` 請勿上傳，僅保留 `.env.sample`。
+本專案架構完全模組化，您可以極其輕鬆地擴充它：
+
+### 如何新增一個 Slash 指令？
+1. 在 `commands/` 資料夾下建立一個新的 `.js` 檔案（例如 `hello.js`）。
+2. 匯出符合 Discord.js 規範的指令結構：
+   ```javascript
+   const { SlashCommandBuilder } = require('discord.js');
+   module.exports = {
+     data: new SlashCommandBuilder()
+       .setName('hello')
+       .setDescription('向你打招呼'),
+     async execute(interaction) {
+       await interaction.reply('哈囉！');
+     },
+   };
+   ```
+3. 重新執行 `node core/deploy-commands.js` 註冊指令，並重啟 Bot。
+
+### 如何新增網址轉換規則？
+*   如果是**簡單的域名替換**：直接編輯 `handlers/simple.js` 裡的 `domainMap`。
+*   如果是**複雜的 API 解析**：在 `handlers/` 下建立新的處理器檔案，並在 `handlers/index.js` 中註冊即可。
 
 ---
 
-## 💾 資料儲存
+## 📄 授權條款
 
-- 使用 SQLite 儲存提醒事項與 ChatGPT 對話記錄
-- 資料庫位於 `data/bot.db`，可自由備份或重新建立
-
----
-
-🔧 本專案為個人使用，不包含 AI 訓練或大型資料庫，主打簡單維護與快速擴充。
+本專案採用 [MIT License](LICENSE) 進行授權。歡迎自由 Fork、修改與分享！
