@@ -1,8 +1,23 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const db = require('../core/db');
 
+// SQL 語句只需準備一次，重複使用以省去每次執行時的解析成本
+const insertReminder = db.prepare(`
+	INSERT INTO reminders (user_id, remind_at, message, method, channel_id)
+	VALUES (?, ?, ?, ?, ?)
+`);
+const listReminders = db.prepare(`
+	SELECT id, remind_at, message, method FROM reminders
+	WHERE user_id = ?
+	ORDER BY remind_at ASC
+`);
+const deleteReminder = db.prepare('DELETE FROM reminders WHERE id = ? AND user_id = ?');
+
+// Discord embed 最多允許 25 個欄位
+const MAX_EMBED_FIELDS = 25;
+
 function parseDuration(input) {
-	const regex = /(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?/;
+	const regex = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/;
 	const matches = input.match(regex);
 	if (!matches) return null;
 
@@ -55,7 +70,7 @@ module.exports = {
 			const timeInput = interaction.options.getString('time');
 			const customMessage = interaction.options.getString('message');
 			const userId = interaction.user.id;
-			const channelId = interaction.channel.id;
+			const channelId = interaction.channelId;
 
 			let delay;
 
@@ -66,32 +81,23 @@ module.exports = {
 			}
 
 			if (!delay || delay <= 0) {
-				return interaction.reply({ content: '提醒時間格式錯誤或已過期，請重新輸入。', ephemeral: true });
+				return interaction.reply({ content: '提醒時間格式錯誤或已過期，請重新輸入。', flags: MessageFlags.Ephemeral });
 			}
 
 			const remindAt = Math.floor(Date.now() + delay);
 
-			db.prepare(`
-				INSERT INTO reminders (user_id, remind_at, message, method, channel_id)
-				VALUES (?, ?, ?, ?, ?)
-			`).run(userId, remindAt, customMessage, method, channelId);
+			insertReminder.run(userId, remindAt, customMessage, method, channelId);
 
 			await interaction.reply({
 				content: `⏰ 好的！我會在 <t:${Math.floor(remindAt / 1000)}:R> 提醒你。`,
-				ephemeral: true,
+				flags: MessageFlags.Ephemeral,
 			});
 
 		} else if (subcommand === 'list') {
-			const userId = interaction.user.id;
-
-			const reminders = db.prepare(`
-				SELECT id, remind_at, message, method FROM reminders
-				WHERE user_id = ?
-				ORDER BY remind_at ASC
-			`).all(userId);
+			const reminders = listReminders.all(interaction.user.id);
 
 			if (reminders.length === 0) {
-				return interaction.reply({ content: '你目前沒有任何提醒。', ephemeral: true });
+				return interaction.reply({ content: '你目前沒有任何提醒。', flags: MessageFlags.Ephemeral });
 			}
 
 			const embed = new EmbedBuilder()
@@ -99,7 +105,7 @@ module.exports = {
 				.setColor(0x00BFFF)
 				.setTimestamp();
 
-			for (const r of reminders) {
+			for (const r of reminders.slice(0, MAX_EMBED_FIELDS)) {
 				const time = `<t:${Math.floor(r.remind_at / 1000)}:R>`;
 				embed.addFields({
 					name: `#${r.id} (${r.method})`,
@@ -107,24 +113,21 @@ module.exports = {
 				});
 			}
 
-			return interaction.reply({ embeds: [embed], ephemeral: true });
+			if (reminders.length > MAX_EMBED_FIELDS) {
+				embed.setFooter({ text: `僅顯示最近的 ${MAX_EMBED_FIELDS} 筆，共 ${reminders.length} 筆` });
+			}
+
+			return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
 		} else if (subcommand === 'delete') {
 			const id = interaction.options.getInteger('id');
-			const userId = interaction.user.id;
+			const result = deleteReminder.run(id, interaction.user.id);
 
-			const reminder = db.prepare('SELECT * FROM reminders WHERE id = ?').get(id);
-
-			if (!reminder) {
-				return interaction.reply({ content: '找不到這個提醒。', ephemeral: true });
+			if (result.changes === 0) {
+				return interaction.reply({ content: '找不到這個提醒，或你無權刪除它。', flags: MessageFlags.Ephemeral });
 			}
 
-			if (reminder.user_id !== userId) {
-				return interaction.reply({ content: '你無權刪除此提醒。', ephemeral: true });
-			}
-
-			db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
-			return interaction.reply({ content: `✅ 提醒 #${id} 已刪除。`, ephemeral: true });
+			return interaction.reply({ content: `✅ 提醒 #${id} 已刪除。`, flags: MessageFlags.Ephemeral });
 		}
 	},
 };

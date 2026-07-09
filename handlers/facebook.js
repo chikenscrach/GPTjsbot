@@ -1,13 +1,16 @@
 // handlers/facebook.js
 // 基於 fb.js 整合版邏輯，解析 Facebook 短網址為真實主文網址，並替換為 facebed.com 供 Discord 預覽
 
+// 單次請求的逾時上限，避免 Facebook 回應緩慢時無限懸掛
+const FETCH_TIMEOUT_MS = 8000;
+
 /**
  * 用 plugins/post.php 外嵌還原「相片所屬的母貼文」
  * 使用爬蟲 UA，抽取 ?ref=embed_post 連結
  */
 async function fetchEmbed(href, headers) {
 	const url = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
-	const r = await fetch(url, { headers });
+	const r = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	const html = await r.text();
 	if (r.status !== 200 || html.length < 3000) return null;
 
@@ -42,7 +45,7 @@ module.exports = {
 			};
 
 			// ---- Phase 1：追蹤重導向 ----
-			const resp = await fetch(url, { headers, redirect: 'follow' });
+			const resp = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 			const html = await resp.text();
 			let finalUrl = resp.url;
 			let urlObj = new URL(finalUrl);

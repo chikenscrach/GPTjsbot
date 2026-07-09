@@ -2,7 +2,7 @@ require('dotenv').config();
 require('./core/db'); // 順便初始化 DB
 const fs = require('fs');
 const path = require('path');
-const { Client, Collection, GatewayIntentBits } = require('discord.js');
+const { Client, Collection, Events, GatewayIntentBits, MessageFlags } = require('discord.js');
 const { startScheduler } = require('./core/scheduler');
 
 const client = new Client({
@@ -35,15 +35,23 @@ const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith('.js'
 for (const file of eventFiles) {
 	const filePath = path.join(eventsPath, file);
 	const event = require(filePath);
+	// 捕捉事件處理中的錯誤，避免 unhandled rejection 讓整個程序崩潰
+	const run = async (...args) => {
+		try {
+			await event.execute(...args);
+		} catch (err) {
+			console.error(`[事件錯誤] ${event.name}：`, err);
+		}
+	};
 	if (event.once) {
-		client.once(event.name, (...args) => event.execute(...args));
+		client.once(event.name, run);
 	} else {
-		client.on(event.name, (...args) => event.execute(...args));
+		client.on(event.name, run);
 	}
 }
 
 // Bot 啟動事件
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
 	console.log(`✅ 已登入：${client.user.tag}`);
 	startScheduler(client);
 
@@ -64,7 +72,7 @@ client.once('ready', () => {
 
 
 // Slash 指令事件
-client.on('interactionCreate', async interaction => {
+client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
@@ -74,7 +82,18 @@ client.on('interactionCreate', async interaction => {
     await command.execute(interaction);
   } catch (error) {
     console.error(error);
-    await interaction.reply({ content: '❌ 執行指令時發生錯誤。', ephemeral: true });
+    // 指令可能已 defer 或已回覆過，依互動狀態選擇正確的回覆方式
+    try {
+      if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply('❌ 執行指令時發生錯誤。');
+      } else if (interaction.replied) {
+        await interaction.followUp({ content: '❌ 執行指令時發生錯誤。', flags: MessageFlags.Ephemeral });
+      } else {
+        await interaction.reply({ content: '❌ 執行指令時發生錯誤。', flags: MessageFlags.Ephemeral });
+      }
+    } catch (err) {
+      console.error('回覆錯誤訊息失敗：', err);
+    }
   }
 });
 

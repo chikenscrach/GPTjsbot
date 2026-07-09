@@ -14,7 +14,7 @@ module.exports = {
 
 		const embed = new EmbedBuilder()
 			.setTitle(`${user.username} 的頭像`)
-			.setImage(user.displayAvatarURL({ dynamic: true, size: 512 }))
+			.setImage(user.displayAvatarURL({ forceStatic: false, size: 512 }))
 			.setColor(0x00AE86);
 
 		await interaction.reply({ embeds: [embed] });

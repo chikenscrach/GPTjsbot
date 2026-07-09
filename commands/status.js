@@ -20,12 +20,16 @@ module.exports = {
 		const memoryUsage = process.memoryUsage().heapUsed / 1024 / 1024; // MB
 		const ownerId = process.env.BOT_OWNER_ID;
 
-		let ownerTag = '無法取得';
-		try {
-			const user = await interaction.client.users.fetch(ownerId);
-			ownerTag = `${user.username}#${user.discriminator}`;
-		} catch (err) {
-			console.error('❌ 無法取得 owner 資訊：', err);
+		let ownerField = '未設定';
+		if (ownerId) {
+			ownerField = `<@${ownerId}>`;
+			try {
+				// users.fetch 會優先使用快取，不會每次都打 API
+				const user = await interaction.client.users.fetch(ownerId);
+				ownerField = `<@${ownerId}> (${user.tag})`;
+			} catch (err) {
+				console.error('❌ 無法取得 owner 資訊：', err);
+			}
 		}
 
 		await interaction.reply({
@@ -36,7 +40,7 @@ module.exports = {
 					fields: [
 						{ name: '⏱️ Uptime', value: uptime, inline: true },
 						{ name: '🧠 記憶體使用', value: `${memoryUsage.toFixed(2)} MB`, inline: true },
-						{ name: '👑 Owner', value: `<@${ownerId}> (${ownerTag})`, inline: false },
+						{ name: '👑 Owner', value: ownerField, inline: false },
 						{ name: '🌐 伺服器數量', value: `${interaction.client.guilds.cache.size} 個伺服器`, inline: true }
 					],
 					timestamp: new Date().toISOString()

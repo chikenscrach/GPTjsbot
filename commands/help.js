@@ -1,30 +1,17 @@
-const fs = require("fs");
-const path = require("path");
-const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("help")
     .setDescription("顯示所有可用的指令"),
   async execute(interaction) {
-    const commandsPath = path.join(__dirname); // 目前這是 commands 資料夾
-    const commandFiles = fs
-      .readdirSync(commandsPath)
-      .filter(file => file.endsWith(".js"));
-
-    const fields = [];
-
-    for (const file of commandFiles) {
-      if (file === "help.js") continue; // 排除自己
-
-      const command = require(path.join(commandsPath, file));
-      if (command.data && command.data.name && command.data.description) {
-        fields.push({
-          name: `/${command.data.name}`,
-          value: command.data.description,
-        });
-      }
-    }
+    // 指令啟動時已載入 client.commands，直接使用即可，不必重新掃描檔案
+    const fields = interaction.client.commands
+      .filter(command => command.data.name !== "help")
+      .map(command => ({
+        name: `/${command.data.name}`,
+        value: command.data.description,
+      }));
 
     const helpEmbed = new EmbedBuilder()
       .setColor(0x00bfff)
@@ -33,6 +20,6 @@ module.exports = {
       .addFields(fields)
       .setFooter({ text: "使用 / 指令開始互動吧！" });
 
-    await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
+    await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
   },
 };
