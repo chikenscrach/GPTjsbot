@@ -1,6 +1,9 @@
 const { Events, EmbedBuilder } = require('discord.js');
 const handlers = require('../handlers');
 
+// Discord 單一訊息的附件上限
+const MAX_ATTACH_PER_MSG = 10;
+
 async function convertUrl(url) {
 	let hostname;
 	try {
@@ -50,8 +53,11 @@ module.exports = {
 		const mainEmbeds = embedItems
 			.map(i => new EmbedBuilder(i.embed))
 			.slice(0, 10);
-		const mainFiles = embedItems
+		// 多則貼文的附件合併後可能超過單一訊息上限，超出的部分分批到後續訊息
+		const allFiles = embedItems
 			.flatMap(i => Array.isArray(i.files) ? i.files : []);
+		const mainFiles = allFiles.slice(0, MAX_ATTACH_PER_MSG);
+		const overflowFiles = allFiles.slice(MAX_ATTACH_PER_MSG);
 
 		// notice 只是提示訊息，不算實際轉換，不需要關閉原訊息的 embed
 		const hasPayload =
@@ -92,8 +98,11 @@ module.exports = {
 			}
 		}
 
-		// 額外訊息（例如多媒體超出 10 個附件上限的後續批次）
+		// 額外訊息：先送主訊息放不下的附件批次，再送 handler 自帶的批次
 		const extra = [];
+		for (let i = 0; i < overflowFiles.length; i += MAX_ATTACH_PER_MSG) {
+			extra.push({ files: overflowFiles.slice(i, i + MAX_ATTACH_PER_MSG) });
+		}
 		for (const item of embedItems) {
 			if (Array.isArray(item.additionalMessages)) extra.push(...item.additionalMessages);
 		}

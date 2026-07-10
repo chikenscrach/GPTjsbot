@@ -20,10 +20,17 @@ const FETCH_TIMEOUT = 20000;
 const FETCH_MEDIA_TIMEOUT = 25000;
 const THREADS_POST_RE = /^\/@([A-Za-z0-9._]+)\/post\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/;
 
-const THREADS_COLOR = 0x1A1A1A;
+// embed 顏色依貼文類型區分
+const THREADS_COLORS = {
+    text:  0x1A1A1A, // 純文字：Threads 黑
+    image: 0x0095F6, // 圖片貼文：藍
+    video: 0xE1306C, // 影片貼文：桃紅
+    mixed: 0x8A3AB9, // 圖片 + 影片混合：紫
+};
 const MAX_ATTACH_PER_MSG = 10;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // Discord 未加成伺服器的上限 10MB，超過立即中斷下載
-const MAX_PARALLEL_MEDIA = 6;
+// 媒體平行下載數，可透過環境變數 THREADS_MAX_PARALLEL_MEDIA 調整
+const MAX_PARALLEL_MEDIA = Math.max(1, parseInt(process.env.THREADS_MAX_PARALLEL_MEDIA, 10) || 6);
 
 // 重點：少了 Accept (含 image/webp) 與 Sec-Fetch-*、Accept-Encoding:br 會讓 Threads 只回精簡頁
 const BROWSER_HEADERS = {
@@ -298,6 +305,18 @@ function extFromUrl(url, kind) {
     return m ? '.' + m[1].toLowerCase() : '.jpg';
 }
 
+// 找貼文作者的頭像網址：優先從已解析的貼文物件，再退回從 HTML 掃描該使用者的 profile_pic_url
+function findProfilePic(obj, html, username) {
+    if (obj) {
+        const u = obj.user || obj.owner;
+        if (u && typeof u.profile_pic_url === 'string' && u.profile_pic_url) return u.profile_pic_url;
+    }
+    const esc = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let m = html.match(new RegExp(`"username":"${esc}"[^{}]*?"profile_pic_url":"((?:[^"\\\\]|\\\\.)+)"`));
+    if (!m) m = html.match(new RegExp(`"profile_pic_url":"((?:[^"\\\\]|\\\\.)+)"[^{}]*?"username":"${esc}"`));
+    return m ? jstr(m[1]) : null;
+}
+
 // -------------------- main --------------------
 
 module.exports = {
@@ -356,11 +375,10 @@ module.exports = {
             .trim();
         const displayName = dn || `@${username}`;
 
-        // 媒體
+        // 媒體（純文字貼文不把 og:image 當成貼文圖片——那只是自動產生的預覽卡，不是內容）
         const chunks = extractSjsChunks(html);
         const found = findPostObject(chunks, postCode);
         let media = (found && found.media) || [];
-        if (media.length === 0 && ogImage) media = [{ image: ogImage }];
 
         // 去重
         const seen = new Set();
@@ -386,11 +404,22 @@ module.exports = {
         const first = media[0];
         const rest  = media.slice(1);
 
+        // 貼文類型 → 對應顏色（影片項目會同時帶封面圖，判斷以 video 優先）
+        const hasVid = media.some(it => it.video);
+        const hasImg = media.some(it => it.image && !it.video);
+        const postType = media.length === 0 ? 'text' : (hasVid && hasImg ? 'mixed' : hasVid ? 'video' : 'image');
+
+        // 作者頭像；純文字貼文的 og:image 通常就是作者頭像，可作為備援
+        const profilePic = findProfilePic(found && found.obj, html, username)
+            || (postType === 'text' ? ogImage : null);
+
+        const author = { name: `${displayName} (@${username})`, url: cleanUrl };
+        if (profilePic) author.iconURL = profilePic;
+
         const embed = new EmbedBuilder()
-            .setColor(THREADS_COLOR)
+            .setColor(THREADS_COLORS[postType])
             .setURL(cleanUrl)
-            .setFooter({ text: 'Threads' })
-            .setAuthor({ name: `${displayName} (@${username})`, url: cleanUrl });
+            .setAuthor(author);
         if (caption && caption.trim()) embed.setDescription(caption.trim());
 
         // 安排下載：第一個若為影片 → 下載（當附件）；其餘影片 → 下載；其餘圖片 → 下載
@@ -411,26 +440,31 @@ module.exports = {
             }
         }
 
+        let skippedBig = 0;
         if (downloads.length) {
             const results = await limitParallel(
                 downloads.map(d => async () => ({ ...d, res: await fetchMedia(d.url, d.kind) })),
                 MAX_PARALLEL_MEDIA
             );
             for (const r of results) {
-                if (!r.res || r.res.tooBig) { attachments[r.idx] = null; continue; }
+                if (r.res && r.res.tooBig) { skippedBig++; attachments[r.idx] = null; continue; }
+                if (!r.res) { attachments[r.idx] = null; continue; }
                 const fname = `${postCode}_${r.idx}${extFromUrl(r.url, r.kind)}`;
                 attachments[r.idx] = new AttachmentBuilder(r.res.buf, { name: fname });
             }
         }
         const files = attachments.filter(Boolean);
 
-        // 封面
+        // 超過大小上限而未附上的媒體，在 footer 提示
+        const sizeMB = Math.floor(MAX_FILE_SIZE / 1024 / 1024);
+        embed.setFooter({
+            text: skippedBig > 0 ? `Threads • ${skippedBig} 個媒體超過 ${sizeMB}MB 未附上` : 'Threads',
+        });
+
+        // 封面（僅媒體貼文；純文字貼文不放大圖）
         if (first) {
-            if (first.image && !first.video) embed.setImage(first.image);
-            else if (first.image) embed.setImage(first.image); // video 文也放封面
-            else if (ogImage) embed.setImage(ogImage);
-        } else if (ogImage) {
-            embed.setImage(ogImage);
+            if (first.image) embed.setImage(first.image); // 首圖或影片封面
+            else if (ogImage) embed.setImage(ogImage);    // 影片無封面時退回 og:image
         }
 
         // 分批附件
