@@ -7,8 +7,8 @@
 //   2. 從 <script type="application/json" data-sjs> 裡定位貼文主物件，抽出媒體清單：
 //      - carousel_media 陣列存在 → 逐項抽 image 或 video
 //      - 否則 → 頂層 image_versions2 / video_versions 視為單一媒體
-//   3. 回傳 1 個主 embed（作者 + 內文 + 第一張圖/封面） + 把其餘圖/所有影片當附件上傳。
-//      Discord 會把圖片附件排網格、影片附件顯示原生播放器。
+//   3. 純圖片貼文：前 4 張用同 URL 多 embed 合併成單一 embed 的圖片網格（不需下載）；
+//      第 5 張起、以及所有影片與含影片貼文的圖片，下載後當附件上傳（影片原生播放）。
 //   4. 超過 10 個附件時分批經由 additionalMessages 回傳，由 messageCreate 逐條送出。
 //
 // 回傳格式：
@@ -457,10 +457,10 @@ module.exports = {
             || (postType === 'text' ? ogImage : null);
 
         const imageItems = media.filter(it => it.image && !it.video);
-        const embedImageUrls = !hasVid && imageItems.length > 0 && imageItems.length <= 4
-            ? imageItems.map(it => it.image)
-            : [];
-        const shouldUploadMedia = hasVid || imageItems.length > 4;
+        // 純圖片貼文：前 4 張放進 embed 圖片網格（同 URL 多 embed 合併，畫面上是同一個
+        // embed、不需下載），第 5 張起才改用附件上傳；含影片時全部媒體都用附件。
+        const embedImageUrls = !hasVid ? imageItems.slice(0, 4).map(it => it.image) : [];
+        const uploadList = hasVid ? media : imageItems.slice(4);
 
         const embed = new EmbedBuilder()
             .setColor(THREADS_COLORS[postType])
@@ -470,21 +470,19 @@ module.exports = {
         if (caption && caption.trim()) embed.setDescription(caption.trim());
 
         // 媒體呈現規則：
-        // - 純圖片 1~4 張：用 embeds 顯示，不上傳附件。
-        // - 純圖片超過 4 張：embed 只放文字，全部圖片改用附件。
+        // - 純圖片：前 4 張進 embed 圖片網格（不上傳），第 5 張起改用附件。
         // - 只要含影片：embed 只放文字，影片與 standalone 圖片全部改用附件。
+        // - 附件全數失敗時，退回把首張圖 / 影片封面放進 embed（見下方 fallback）。
         const attachments = [];
         const downloads = [];
 
-        if (shouldUploadMedia) {
-            for (const it of media) {
-                if (it.video) {
-                    downloads.push({ kind: 'video', url: it.video, idx: attachments.length });
-                    attachments.push(null);
-                } else if (it.image) {
-                    downloads.push({ kind: 'image', url: it.image, idx: attachments.length });
-                    attachments.push(null);
-                }
+        for (const it of uploadList) {
+            if (it.video) {
+                downloads.push({ kind: 'video', url: it.video, idx: attachments.length });
+                attachments.push(null);
+            } else if (it.image) {
+                downloads.push({ kind: 'image', url: it.image, idx: attachments.length });
+                attachments.push(null);
             }
         }
 
@@ -511,7 +509,7 @@ module.exports = {
         if (failedDownload > 0) footerParts.push(`${failedDownload} 個媒體下載失敗`);
         embed.setFooter({ text: footerParts.join(' • ') });
 
-        // 純圖片 1~4 張：用多個 embed 圖片呈現；若有上傳檔案則 embed 不再放圖片。
+        // 前 4 張圖：用多個同 URL embed 呈現（Discord 會合併成單一 embed 的圖片網格）。
         const embeds = [embed];
         if (embedImageUrls.length > 0) {
             embed.setImage(embedImageUrls[0]);
@@ -521,6 +519,12 @@ module.exports = {
                     .setURL(cleanUrl)
                     .setImage(imageUrl));
             }
+        } else if (downloads.length > 0 && files.length === 0) {
+            // fallback：附件全數失敗或超限（例如影片超過 10MB）時，
+            // 退回把首張圖 / 影片封面放進 embed，避免整則沒有任何視覺內容
+            const firstImg = media.find(it => it.image);
+            if (firstImg) embed.setImage(firstImg.image);
+            else if (ogImage) embed.setImage(ogImage);
         }
 
         // 分批附件
