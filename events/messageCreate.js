@@ -20,7 +20,7 @@ async function convertUrl(url) {
 		if (!result) return null;
 		// 與原網址相同時視為無轉換，避免回覆重複的連結
 		if (typeof result === 'string') return result !== url ? { type: 'url', value: result } : null;
-		if (result && result.type === 'embed' && result.embed) return result;
+		if (result && result.type === 'embed' && (result.embed || Array.isArray(result.embeds))) return result;
 		// handler 回報的提示文字（例如貼文已刪除）
 		if (result && result.type === 'notice' && result.message) return result;
 		if (typeof result === 'object' && result.url) return { type: 'url', value: result.url };
@@ -46,12 +46,13 @@ module.exports = {
 		if (items.length === 0) return;
 
 		const convertedUrls = items.filter(i => i.type === 'url').map(i => i.value);
-		const embedItems  = items.filter(i => i.type === 'embed' && i.embed);
+		const embedItems  = items.filter(i => i.type === 'embed' && (i.embed || Array.isArray(i.embeds)));
 		const noticeTexts = items.filter(i => i.type === 'notice').map(i => i.message);
 
 		// 準備主訊息
 		const mainEmbeds = embedItems
-			.map(i => new EmbedBuilder(i.embed))
+			.flatMap(i => Array.isArray(i.embeds) ? i.embeds : (i.embed ? [i.embed] : []))
+			.map(e => new EmbedBuilder(e))
 			.slice(0, 10);
 		// 多則貼文的附件合併後可能超過單一訊息上限，超出的部分分批到後續訊息
 		const allFiles = embedItems

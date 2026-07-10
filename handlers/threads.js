@@ -12,7 +12,7 @@
 //   4. 超過 10 個附件時分批經由 additionalMessages 回傳，由 messageCreate 逐條送出。
 //
 // 回傳格式：
-//   { type:'embed', embed, files, originalUrl, additionalMessages? }
+//   { type:'embed', embed, embeds?, files, originalUrl, additionalMessages? }
 
 const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
 
@@ -150,14 +150,19 @@ function extractMediaFromObj(o) {
 function extractMedia(obj) {
     const items = [];
     if (!obj || typeof obj !== 'object') return items;
-    const top = extractMediaFromObj(obj);
-    if (top) items.push(top);
-    if (Array.isArray(obj.carousel_media)) {
+
+    // carousel_media 存在時，以 carousel 項目為準；頂層 image/video 常是第一個項目的重複預覽。
+    // 只有 carousel 抽不到任何項目時，才退回頂層媒體。
+    if (Array.isArray(obj.carousel_media) && obj.carousel_media.length) {
         for (const c of obj.carousel_media) {
             const e = extractMediaFromObj(c);
             if (e) items.push(e);
         }
+        if (items.length) return items;
     }
+
+    const top = extractMediaFromObj(obj);
+    if (top) items.push(top);
     return items;
 }
 
@@ -441,42 +446,45 @@ module.exports = {
         if (caption.length > 1900) caption = caption.slice(0, 1900) + '…';
 
         // embed
-        const first = media[0];
-        const rest  = media.slice(1);
-
         // 貼文類型 → 對應顏色（影片項目會同時帶封面圖，判斷以 video 優先）
         const hasVid = media.some(it => it.video);
         const hasImg = media.some(it => it.image && !it.video);
         const postType = media.length === 0 ? 'text' : (hasVid && hasImg ? 'mixed' : hasVid ? 'video' : 'image');
 
-        // 作者頭像；純文字貼文的 og:image 通常就是作者頭像，可作為備援
+        // 作者頭像；純文字貼文的 og:image 通常就是作者頭像，可作為備援。
+        // 放在右上角 thumbnail，比 author icon 稍大且不會佔用大圖區。
         const profilePic = findProfilePic(found && found.obj, html, username)
             || (postType === 'text' ? ogImage : null);
 
-        const author = { name: `${displayName} (@${username})`, url: cleanUrl };
-        if (profilePic) author.iconURL = profilePic;
+        const imageItems = media.filter(it => it.image && !it.video);
+        const embedImageUrls = !hasVid && imageItems.length > 0 && imageItems.length <= 4
+            ? imageItems.map(it => it.image)
+            : [];
+        const shouldUploadMedia = hasVid || imageItems.length > 4;
 
         const embed = new EmbedBuilder()
             .setColor(THREADS_COLORS[postType])
             .setURL(cleanUrl)
-            .setAuthor(author);
+            .setAuthor({ name: `${displayName} (@${username})`, url: cleanUrl });
+        if (profilePic) embed.setThumbnail(profilePic);
         if (caption && caption.trim()) embed.setDescription(caption.trim());
 
-        // 安排下載：第一個若為影片 → 下載（當附件）；其餘影片 → 下載；其餘圖片 → 下載
-        // （圖片用附件才能排出網格；第一張圖直接用 URL 放 embed.setImage）
+        // 媒體呈現規則：
+        // - 純圖片 1~4 張：用 embeds 顯示，不上傳附件。
+        // - 純圖片超過 4 張：embed 只放文字，全部圖片改用附件。
+        // - 只要含影片：embed 只放文字，影片與 standalone 圖片全部改用附件。
         const attachments = [];
         const downloads = [];
 
-        if (first) {
-            if (first.video) {
-                downloads.push({ kind: 'video', url: first.video, idx: attachments.length });
-                attachments.push(null);
-            }
-        }
-        for (const it of rest) {
-            if (it.video || it.image) {
-                downloads.push({ kind: it.video ? 'video' : 'image', url: it.video || it.image, idx: attachments.length });
-                attachments.push(null);
+        if (shouldUploadMedia) {
+            for (const it of media) {
+                if (it.video) {
+                    downloads.push({ kind: 'video', url: it.video, idx: attachments.length });
+                    attachments.push(null);
+                } else if (it.image) {
+                    downloads.push({ kind: 'image', url: it.image, idx: attachments.length });
+                    attachments.push(null);
+                }
             }
         }
 
@@ -503,10 +511,16 @@ module.exports = {
         if (failedDownload > 0) footerParts.push(`${failedDownload} 個媒體下載失敗`);
         embed.setFooter({ text: footerParts.join(' • ') });
 
-        // 封面（僅媒體貼文；純文字貼文不放大圖）
-        if (first) {
-            if (first.image) embed.setImage(first.image); // 首圖或影片封面
-            else if (ogImage) embed.setImage(ogImage);    // 影片無封面時退回 og:image
+        // 純圖片 1~4 張：用多個 embed 圖片呈現；若有上傳檔案則 embed 不再放圖片。
+        const embeds = [embed];
+        if (embedImageUrls.length > 0) {
+            embed.setImage(embedImageUrls[0]);
+            for (const imageUrl of embedImageUrls.slice(1)) {
+                embeds.push(new EmbedBuilder()
+                    .setColor(THREADS_COLORS[postType])
+                    .setURL(cleanUrl)
+                    .setImage(imageUrl));
+            }
         }
 
         // 分批附件
@@ -523,6 +537,7 @@ module.exports = {
         return {
             type: 'embed',
             embed: embed.toJSON(),
+            embeds: embeds.map(e => e.toJSON()),
             files: mainFiles,
             additionalMessages,
             originalUrl: cleanUrl,
