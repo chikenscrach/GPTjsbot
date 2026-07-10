@@ -30,7 +30,7 @@ const THREADS_COLORS = {
 const MAX_ATTACH_PER_MSG = 10;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // Discord 未加成伺服器的上限 10MB，超過立即中斷下載
 // 媒體平行下載數，可透過環境變數 THREADS_MAX_PARALLEL_MEDIA 調整
-const MAX_PARALLEL_MEDIA = Math.max(1, parseInt(process.env.THREADS_MAX_PARALLEL_MEDIA, 10) || 6);
+const MAX_PARALLEL_MEDIA = Math.min(10, Math.max(1, parseInt(process.env.THREADS_MAX_PARALLEL_MEDIA, 10) || 6));
 
 // 重點：少了 Accept (含 image/webp) 與 Sec-Fetch-*、Accept-Encoding:br 會讓 Threads 只回精簡頁
 const BROWSER_HEADERS = {
@@ -162,85 +162,125 @@ function extractMedia(obj) {
 }
 
 function findPostObject(chunks, shortcode) {
-    // 1) 鎖定 target chunk
-    let target = null;
-    for (const ch of chunks) {
-        if (ch.includes(`"code":"${shortcode}"`) &&
-            (ch.includes('image_versions2') || ch.includes('carousel_media') || ch.includes('video_versions'))) {
-            target = ch; break;
-        }
-    }
-    if (!target) {
-        target = chunks.reduce((a, b) => {
-            const score = c => (c.match(/video_versions/g) || []).length
-                           + (c.match(/carousel_media/g) || []).length
-                           + (c.match(/image_versions2/g) || []).length;
-            return !a || score(b) > score(a) ? b : a;
-        }, null);
-    }
-    if (!target) return null;
+    const codeNeedle = `"code":"${shortcode}"`;
+    const hasMediaMarkers = c => c.includes('image_versions2')
+        || c.includes('carousel_media')
+        || c.includes('video_versions');
+    const mediaScore = c => (c.match(/video_versions/g) || []).length
+        + (c.match(/carousel_media/g) || []).length
+        + (c.match(/image_versions2/g) || []).length;
+    const objScore = o => {
+        if (!o || typeof o !== 'object') return 0;
+        let score = 0;
+        const media = extractMedia(o);
+        if (media.length) score += 100 + media.length;
+        if (o.caption && typeof o.caption.text === 'string') score += 50;
+        const u = o.user || o.owner;
+        if (u && typeof u.profile_pic_url === 'string') score += 10;
+        if (o.code === shortcode) score += 5;
+        return score;
+    };
 
-    // 2) 在 target 中從每個 "code":"SHORTCODE" 往外用 {} 配對並 JSON.parse
-    const pat = new RegExp(`"code":"${shortcode}"`, 'g');
-    let m;
-    while ((m = pat.exec(target)) !== null) {
-        let i = m.index;
-        while (i > 0 && target[i] !== '{') i--;
-        if (i <= 0) continue;
-        const blk = balancedBlock(target, i, '{', '}');
-        if (!blk) continue;
-        let obj;
-        try { obj = JSON.parse(target.slice(blk[0], blk[1])); } catch { continue; }
-        const media = extractMedia(obj);
-        if (media.length > 0) return { obj, media };
+    function parseObjectsAroundCode(target) {
+        const out = [];
+        const pat = new RegExp(`"code":"${shortcode}"`, 'g');
+        let m;
+        while ((m = pat.exec(target)) !== null) {
+            let i = m.index;
+            while (i > 0 && target[i] !== '{') i--;
+            if (i <= 0) continue;
+            const blk = balancedBlock(target, i, '{', '}');
+            if (!blk) continue;
+            try { out.push(JSON.parse(target.slice(blk[0], blk[1]))); }
+            catch { /* ignore malformed / non-standalone JSON object */ }
+        }
+        return out;
     }
 
-    // 3) fallback: regex 掃
-    const media = [];
+    function regexExtractMedia(target) {
+        const media = [];
 
-    // carousel_media
-    const carRe = /"carousel_media":\[/g;
-    let cm;
-    while ((cm = carRe.exec(target)) !== null) {
-        const p = cm.index + cm[0].length - 1; // 指在 '['
-        const blk = balancedBlock(target, p, '[', ']');
-        if (!blk) continue;
-        const inner = target.slice(blk[0]+1, blk[1]-1);
-        for (const os of splitObjects(inner)) {
-            let o; try { o = JSON.parse(os); } catch { continue; }
-            const e = extractMediaFromObj(o); if (e) media.push(e);
-        }
-    }
-    // 頂層 video_versions（小心別重複抓 carousel 內的）
-    const vidRe = /"video_versions":\[/g;
-    let vm;
-    while ((vm = vidRe.exec(target)) !== null) {
-        const before = target.slice(Math.max(0, vm.index - 40), vm.index);
-        if (before.includes('carousel_media')) continue; // 已在上面處理
-        const blk = balancedBlock(target, vm.index + vm[0].length - 1, '[', ']');
-        if (!blk) continue;
-        const arr = target.slice(blk[0]+1, blk[1]-1);
-        const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.mp4[^"]*)"/);
-        if (u) {
-            const url = jstr(u[1]);
-            if (!media.some(x => x.video === url)) media.unshift({ video: url });
-        }
-    }
-    // 頂層 image_versions2（僅當前沒有任何媒體時補一個）
-    if (media.length === 0) {
-        const imgRe = /"image_versions2":\{"candidates":\[/;
-        const im = imgRe.exec(target);
-        if (im) {
-            const blk = balancedBlock(target, im.index + im[0].length - 1, '[', ']');
-            if (blk) {
-                const arr = target.slice(blk[0]+1, blk[1]-1);
-                const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/);
-                if (u) media.push({ image: jstr(u[1]) });
+        // carousel_media
+        const carRe = /"carousel_media":\[/g;
+        let cm;
+        while ((cm = carRe.exec(target)) !== null) {
+            const p = cm.index + cm[0].length - 1; // 指在 '['
+            const blk = balancedBlock(target, p, '[', ']');
+            if (!blk) continue;
+            const inner = target.slice(blk[0]+1, blk[1]-1);
+            for (const os of splitObjects(inner)) {
+                let o; try { o = JSON.parse(os); } catch { continue; }
+                const e = extractMediaFromObj(o); if (e) media.push(e);
             }
         }
+        // 頂層 video_versions（小心別重複抓 carousel 內的）
+        const vidRe = /"video_versions":\[/g;
+        let vm;
+        while ((vm = vidRe.exec(target)) !== null) {
+            const before = target.slice(Math.max(0, vm.index - 40), vm.index);
+            if (before.includes('carousel_media')) continue; // 已在上面處理
+            const blk = balancedBlock(target, vm.index + vm[0].length - 1, '[', ']');
+            if (!blk) continue;
+            const arr = target.slice(blk[0]+1, blk[1]-1);
+            const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.mp4[^"]*)"/);
+            if (u) {
+                const url = jstr(u[1]);
+                if (!media.some(x => x.video === url)) media.unshift({ video: url });
+            }
+        }
+        // 頂層 image_versions2（僅當前沒有任何媒體時補一個）
+        if (media.length === 0) {
+            const imgRe = /"image_versions2":\{"candidates":\[/;
+            const im = imgRe.exec(target);
+            if (im) {
+                const blk = balancedBlock(target, im.index + im[0].length - 1, '[', ']');
+                if (blk) {
+                    const arr = target.slice(blk[0]+1, blk[1]-1);
+                    const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/);
+                    if (u) media.push({ image: jstr(u[1]) });
+                }
+            }
+        }
+
+        return media;
     }
 
-    return { obj: null, media };
+    // 1) 同一個 shortcode 可能出現在多個 data-sjs chunk（SEO / route / analytics / full post）。
+    //    不可直接取第一個；要掃過所有含 shortcode 的 chunk，並優先檢查媒體特徵較完整者。
+    const exactChunks = chunks.filter(ch => ch.includes(codeNeedle));
+    const exactTargets = exactChunks
+        .map((ch, order) => ({ ch, order, score: mediaScore(ch) }))
+        .sort((a, b) => b.score - a.score || a.order - b.order)
+        .map(x => x.ch);
+
+    let bestMatchedObj = null;
+    let bestScore = -1;
+
+    for (const target of exactTargets) {
+        for (const obj of parseObjectsAroundCode(target)) {
+            const score = objScore(obj);
+            if (score > bestScore) { bestScore = score; bestMatchedObj = obj; }
+            const media = extractMedia(obj);
+            if (media.length > 0) return { obj, media };
+        }
+    }
+
+    // 2) 如果 JSON.parse 沒抓到完整 post object，但含 shortcode 的 chunk 有媒體標記，
+    //    才在「含 shortcode 的 chunks」內做 regex fallback；避免掃到頁面其他無關媒體。
+    for (const target of exactTargets) {
+        if (!hasMediaMarkers(target)) continue;
+        const media = regexExtractMedia(target);
+        if (media.length > 0) return { obj: bestMatchedObj, media };
+    }
+
+    // 3) 只要頁面內有 shortcode，就不要退回掃全頁其他媒體。
+    //    這通常代表純文字貼文，或 Threads JSON 結構變動導致無法解析媒體。
+    if (exactChunks.length > 0) return { obj: bestMatchedObj, media: [] };
+
+    // 4) 極端 fallback：完全找不到 shortcode 時，維持舊行為，挑媒體特徵最多的 chunk 掃描。
+    const fallbackTarget = chunks.reduce((a, b) => mediaScore(b) > mediaScore(a || '') ? b : a, null);
+    if (!fallbackTarget) return null;
+    return { obj: null, media: regexExtractMedia(fallbackTarget) };
 }
 
 async function fetchMedia(url, kind) {
@@ -441,6 +481,7 @@ module.exports = {
         }
 
         let skippedBig = 0;
+        let failedDownload = 0;
         if (downloads.length) {
             const results = await limitParallel(
                 downloads.map(d => async () => ({ ...d, res: await fetchMedia(d.url, d.kind) })),
@@ -448,7 +489,7 @@ module.exports = {
             );
             for (const r of results) {
                 if (r.res && r.res.tooBig) { skippedBig++; attachments[r.idx] = null; continue; }
-                if (!r.res) { attachments[r.idx] = null; continue; }
+                if (!r.res) { failedDownload++; attachments[r.idx] = null; continue; }
                 const fname = `${postCode}_${r.idx}${extFromUrl(r.url, r.kind)}`;
                 attachments[r.idx] = new AttachmentBuilder(r.res.buf, { name: fname });
             }
@@ -457,9 +498,10 @@ module.exports = {
 
         // 超過大小上限而未附上的媒體，在 footer 提示
         const sizeMB = Math.floor(MAX_FILE_SIZE / 1024 / 1024);
-        embed.setFooter({
-            text: skippedBig > 0 ? `Threads • ${skippedBig} 個媒體超過 ${sizeMB}MB 未附上` : 'Threads',
-        });
+        const footerParts = ['Threads'];
+        if (skippedBig > 0) footerParts.push(`${skippedBig} 個媒體超過 ${sizeMB}MB 未附上`);
+        if (failedDownload > 0) footerParts.push(`${failedDownload} 個媒體下載失敗`);
+        embed.setFooter({ text: footerParts.join(' • ') });
 
         // 封面（僅媒體貼文；純文字貼文不放大圖）
         if (first) {

@@ -101,7 +101,10 @@ module.exports = {
 		// 額外訊息：先送主訊息放不下的附件批次，再送 handler 自帶的批次
 		const extra = [];
 		for (let i = 0; i < overflowFiles.length; i += MAX_ATTACH_PER_MSG) {
-			extra.push({ files: overflowFiles.slice(i, i + MAX_ATTACH_PER_MSG) });
+			extra.push({
+				content: i === 0 ? '📎 其他媒體：' : undefined,
+				files: overflowFiles.slice(i, i + MAX_ATTACH_PER_MSG),
+			});
 		}
 		for (const item of embedItems) {
 			if (Array.isArray(item.additionalMessages)) extra.push(...item.additionalMessages);
