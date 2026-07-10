@@ -1,4 +1,4 @@
-const { Events } = require('discord.js');
+const { Events, EmbedBuilder } = require('discord.js');
 const handlers = require('../handlers');
 
 async function convertUrl(url) {
@@ -14,7 +14,12 @@ async function convertUrl(url) {
 
 	try {
 		const result = await handler.resolve(url);
-		return result && result !== url ? result : null;
+		if (!result) return null;
+		// 與原網址相同時視為無轉換，避免回覆重複的連結
+		if (typeof result === 'string') return result !== url ? { type: 'url', value: result } : null;
+		if (result && result.type === 'embed' && result.embed) return result;
+		if (typeof result === 'object' && result.url) return { type: 'url', value: result.url };
+		return null;
 	} catch (err) {
 		console.warn(`[${handler.name} handler] 解析失敗：`, err);
 		return null;
@@ -30,27 +35,74 @@ module.exports = {
 		const urls = message.content.match(urlRegex);
 		if (!urls) return;
 
-		// 去除重複網址後平行解析，避免逐一等待造成延遲
 		const uniqueUrls = [...new Set(urls)];
 		const results = await Promise.all(uniqueUrls.map(convertUrl));
-		const converted = results.filter(Boolean);
+		const items = results.filter(Boolean);
+		if (items.length === 0) return;
 
-		if (converted.length === 0) return;
+		const convertedUrls = items.filter(i => i.type === 'url').map(i => i.value);
+		const embedItems  = items.filter(i => i.type === 'embed' && i.embed);
 
-		try {
-			await message.suppressEmbeds(true);
-		} catch (err) {
-			console.warn('無法關閉 embed：', err);
+		// 準備主訊息
+		const mainEmbeds = embedItems
+			.map(i => new EmbedBuilder(i.embed))
+			.slice(0, 10);
+		const mainFiles = embedItems
+			.flatMap(i => Array.isArray(i.files) ? i.files : []);
+
+		const hasPayload =
+			mainEmbeds.length > 0 ||
+			mainFiles.length > 0 ||
+			convertedUrls.length > 0;
+
+		if (hasPayload) {
+			try { await message.suppressEmbeds(true); }
+			catch (err) { console.warn('無法關閉 embed：', err.message); }
 		}
 
-		try {
-			await message.channel.send({
-				content: converted.join('\n'),
-				reply: { messageReference: message.id },
-				allowedMentions: { repliedUser: false }
-			});
-		} catch (err) {
-			console.warn('無法發送轉換後的網址：', err);
+		const payload = {
+			reply: { messageReference: message.id },
+			allowedMentions: { repliedUser: false },
+		};
+		if (mainEmbeds.length) payload.embeds = mainEmbeds;
+		if (mainFiles.length)  payload.files  = mainFiles;
+		if (convertedUrls.length) payload.content = convertedUrls.join('\n');
+
+		if (payload.content || (payload.embeds && payload.embeds.length) || (payload.files && payload.files.length)) {
+			try {
+				await message.channel.send(payload);
+			} catch (err) {
+				console.warn('無法送出轉換後的訊息：', err);
+				// 附件上傳失敗（如超過伺服器檔案大小上限）時，退回純 embed / 連結再試一次
+				if (payload.files) {
+					delete payload.files;
+					if (payload.content || payload.embeds) {
+						try {
+							await message.channel.send(payload);
+						} catch (err2) {
+							console.warn('退回無附件訊息仍失敗：', err2);
+						}
+					}
+				}
+			}
 		}
-	}
+
+		// 額外訊息（例如多媒體超出 10 個附件上限的後續批次）
+		const extra = [];
+		for (const item of embedItems) {
+			if (Array.isArray(item.additionalMessages)) extra.push(...item.additionalMessages);
+		}
+		for (const msg of extra) {
+			try {
+				await message.channel.send({
+					content: msg.content,
+					files:   msg.files,
+					embeds:  msg.embeds ? msg.embeds.map(e => new EmbedBuilder(e)) : undefined,
+					allowedMentions: { repliedUser: false },
+				});
+			} catch (err) {
+				console.warn('無法送出額外媒體訊息：', err);
+			}
+		}
+	},
 };
