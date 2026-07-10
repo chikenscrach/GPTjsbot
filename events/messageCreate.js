@@ -18,6 +18,8 @@ async function convertUrl(url) {
 		// 與原網址相同時視為無轉換，避免回覆重複的連結
 		if (typeof result === 'string') return result !== url ? { type: 'url', value: result } : null;
 		if (result && result.type === 'embed' && result.embed) return result;
+		// handler 回報的提示文字（例如貼文已刪除）
+		if (result && result.type === 'notice' && result.message) return result;
 		if (typeof result === 'object' && result.url) return { type: 'url', value: result.url };
 		return null;
 	} catch (err) {
@@ -42,6 +44,7 @@ module.exports = {
 
 		const convertedUrls = items.filter(i => i.type === 'url').map(i => i.value);
 		const embedItems  = items.filter(i => i.type === 'embed' && i.embed);
+		const noticeTexts = items.filter(i => i.type === 'notice').map(i => i.message);
 
 		// 準備主訊息
 		const mainEmbeds = embedItems
@@ -50,6 +53,7 @@ module.exports = {
 		const mainFiles = embedItems
 			.flatMap(i => Array.isArray(i.files) ? i.files : []);
 
+		// notice 只是提示訊息，不算實際轉換，不需要關閉原訊息的 embed
 		const hasPayload =
 			mainEmbeds.length > 0 ||
 			mainFiles.length > 0 ||
@@ -66,7 +70,8 @@ module.exports = {
 		};
 		if (mainEmbeds.length) payload.embeds = mainEmbeds;
 		if (mainFiles.length)  payload.files  = mainFiles;
-		if (convertedUrls.length) payload.content = convertedUrls.join('\n');
+		const contentParts = [...convertedUrls, ...noticeTexts];
+		if (contentParts.length) payload.content = contentParts.join('\n');
 
 		if (payload.content || (payload.embeds && payload.embeds.length) || (payload.files && payload.files.length)) {
 			try {

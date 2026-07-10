@@ -22,7 +22,7 @@ const THREADS_POST_RE = /^\/@([A-Za-z0-9._]+)\/post\/([A-Za-z0-9_-]+)\/?(?:\?.*)
 
 const THREADS_COLOR = 0x1A1A1A;
 const MAX_ATTACH_PER_MSG = 10;
-const MAX_FILE_SIZE = 24 * 1024 * 1024; // 24MB 保險值，避免踩免費額度 25MB
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // Discord 未加成伺服器的上限 10MB，超過立即中斷下載
 const MAX_PARALLEL_MEDIA = 6;
 
 // 重點：少了 Accept (含 image/webp) 與 Sec-Fetch-*、Accept-Encoding:br 會讓 Threads 只回精簡頁
@@ -238,6 +238,7 @@ function findPostObject(chunks, shortcode) {
 
 async function fetchMedia(url, kind) {
     const controller = new AbortController();
+    // timer 移到 finally 才清除，讓 timeout 涵蓋整個 body 下載，不只等到 headers
     const timer = setTimeout(() => controller.abort(), FETCH_MEDIA_TIMEOUT);
     try {
         const resp = await fetch(url, {
@@ -249,14 +250,31 @@ async function fetchMedia(url, kind) {
             },
             signal: controller.signal,
         });
-        clearTimeout(timer);
-        if (!resp.ok) return null;
-        const buf = Buffer.from(await resp.arrayBuffer());
-        if (buf.length > MAX_FILE_SIZE) return { tooBig: true, bufLen: buf.length };
-        return { buf };
+        if (!resp.ok || !resp.body) return null;
+
+        // 下載前先用 Content-Length 擋掉明顯過大的檔案
+        const declared = parseInt(resp.headers.get('content-length') || '', 10);
+        if (Number.isFinite(declared) && declared > MAX_FILE_SIZE) {
+            controller.abort();
+            return { tooBig: true, bufLen: declared };
+        }
+
+        // streaming 逐塊累積，一超過上限立即 abort，不把整個檔案抓完
+        const parts = [];
+        let total = 0;
+        for await (const chunk of resp.body) {
+            total += chunk.length;
+            if (total > MAX_FILE_SIZE) {
+                controller.abort();
+                return { tooBig: true, bufLen: total };
+            }
+            parts.push(chunk);
+        }
+        return { buf: Buffer.concat(parts) };
     } catch (e) {
-        clearTimeout(timer);
         return null;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -299,21 +317,28 @@ module.exports = {
         const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
 
         let html;
+        const c = new AbortController();
+        // timer 在 finally 才清除，讓 timeout 涵蓋 HTML body 的完整下載
+        const t = setTimeout(() => c.abort(), FETCH_TIMEOUT);
         try {
-            const c = new AbortController();
-            const t = setTimeout(() => c.abort(), FETCH_TIMEOUT);
             const resp = await fetch(cleanUrl, {
                 headers: BROWSER_HEADERS,
                 redirect: 'follow',
                 signal: c.signal,
             });
-            clearTimeout(t);
             if (!resp.ok) return null;
-            if ((resp.url || '').includes('error=') || (resp.url || '').includes('/login')) return null;
+            const finalUrl = resp.url || '';
+            // 被重導向到 ?error=invalid_post：貼文不存在或已刪除，回覆使用者
+            if (finalUrl.includes('error=invalid_post')) {
+                return { type: 'notice', message: '網址錯誤或脆文已刪除' };
+            }
+            if (finalUrl.includes('error=') || finalUrl.includes('/login')) return null;
             html = await resp.text();
         } catch (err) {
             console.warn('[threads] fetch 失敗：', err.message);
             return null;
+        } finally {
+            clearTimeout(t);
         }
 
         const ogTitle = pickMeta(html, 'og:title') || '';
