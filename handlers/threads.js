@@ -165,9 +165,12 @@ function extractMedia(obj) {
 
     // Threads 也可能把轉貼 / link preview 的影片放在 text_post_app_info.linked_inline_media
     // （例如單影片分享文）。這是貼文本身的媒體，不應該退回掃整個 chunk，否則會抓到留言媒體。
+    // 形狀可能是單一物件或陣列，兩種都處理。
     const linked = obj.text_post_app_info && obj.text_post_app_info.linked_inline_media;
-    const linkedMedia = extractMediaFromObj(linked);
-    if (linkedMedia) items.push(linkedMedia);
+    for (const l of Array.isArray(linked) ? linked : [linked]) {
+        const e = extractMediaFromObj(l);
+        if (e) items.push(e);
+    }
 
     const top = extractMediaFromObj(obj);
     if (top) items.push(top);
@@ -197,11 +200,11 @@ function findPostObject(chunks, shortcode) {
     function blocksAroundCode(target) {
         const out = [];
         const seenStarts = new Set();
-        const pat = new RegExp(`"code":"${shortcode}"`, 'g');
-        let m;
-        while ((m = pat.exec(target)) !== null) {
+        let from = 0, at;
+        while ((at = target.indexOf(codeNeedle, from)) !== -1) {
+            from = at + codeNeedle.length;
             let tried = 0;
-            for (let i = m.index; i >= 0 && tried < 160; i--) {
+            for (let i = at; i >= 0 && tried < 160; i--) {
                 if (target[i] !== '{') continue;
                 tried++;
                 if (seenStarts.has(i)) continue;
@@ -216,16 +219,6 @@ function findPostObject(chunks, shortcode) {
         // 從最小的候選物件開始；通常最小且含 code 的可解析區塊就是貼文主物件。
         return out.sort((a, b) => a.text.length - b.text.length || a.start - b.start);
     }
-
-    function parseObjectsAroundCode(target) {
-        const out = [];
-        for (const block of blocksAroundCode(target)) {
-            try { out.push(JSON.parse(block.text)); }
-            catch { /* ignore malformed / non-standalone JSON object */ }
-        }
-        return out;
-    }
-
 
     function regexExtractMedia(target) {
         const media = [];
@@ -287,7 +280,11 @@ function findPostObject(chunks, shortcode) {
     let bestScore = -1;
 
     for (const target of exactTargets) {
-        for (const obj of parseObjectsAroundCode(target)) {
+        // 由小到大逐塊 parse，命中媒體立即返回，避免先把大型祖先 wrapper 全部 parse 完
+        for (const block of blocksAroundCode(target)) {
+            let obj;
+            try { obj = JSON.parse(block.text); }
+            catch { continue; /* malformed / non-standalone JSON object */ }
             const score = objScore(obj);
             if (score > bestScore) { bestScore = score; bestMatchedObj = obj; }
             const media = extractMedia(obj);
@@ -305,7 +302,7 @@ function findPostObject(chunks, shortcode) {
         if (!hasMediaMarkers(target)) continue;
         const blocks = blocksAroundCode(target);
         const postLikeBlocks = blocks.filter(b =>
-            b.text.includes('\"caption\"') || b.text.includes('\"text_post_app_info\"') || b.text.includes('\"media_type\"')
+            b.text.includes('"caption"') || b.text.includes('"text_post_app_info"') || b.text.includes('"media_type"')
         );
         for (const block of (postLikeBlocks.length ? postLikeBlocks : blocks)) {
             const media = regexExtractMedia(block.text);
@@ -415,9 +412,10 @@ function extractPoll(obj) {
 }
 
 function escapeEmbedText(s) {
+    // embed field 會渲染 masked link，[ ] 也要跳脫，避免選項文字注入連結
     return String(s || '')
         .replace(/\\/g, '\\\\')
-        .replace(/([*_`~|])/g, '\\$1')
+        .replace(/([*_`~|[\]])/g, '\\$1')
         .replace(/</g, '‹')
         .replace(/>/g, '›');
 }
@@ -428,7 +426,8 @@ function formatPollField(poll) {
     const fmt = n => Number(n || 0).toLocaleString('en-US');
     const lines = poll.tallies.map((t, idx) => {
         const pct = poll.total > 0 ? (t.count / poll.total) * 100 : 0;
-        const fill = poll.max > 0 ? Math.max(1, Math.round((t.count / poll.max) * barWidth)) : 0;
+        // 0 票不畫實心格，避免看起來像有票
+        const fill = (t.count > 0 && poll.max > 0) ? Math.max(1, Math.round((t.count / poll.max) * barWidth)) : 0;
         const bar = '█'.repeat(fill) + '░'.repeat(barWidth - fill);
         return `${idx + 1}. **${escapeEmbedText(t.text)}**\n   \`${bar}\` **${pct.toFixed(1)}%** · ${fmt(t.count)} 票`;
     });
@@ -437,8 +436,20 @@ function formatPollField(poll) {
     else if (poll.expiresAt) meta.push(`結束時間 <t:${Math.floor(poll.expiresAt)}:R>`);
     else if (poll.viewerCanVote) meta.push('仍可投票');
 
-    let value = `${lines.join('\n')}\n\n${meta.join(' • ')}`;
-    if (value.length > 1024) value = value.slice(0, 1020) + '…';
+    // Discord field value 上限 1024；以「整個選項」為單位截斷，
+    // 避免切在 markdown 標記或 emoji surrogate pair 中間
+    const metaLine = meta.join(' • ');
+    let value = `${lines.join('\n')}\n\n${metaLine}`;
+    if (value.length > 1024) {
+        const kept = [];
+        let used = metaLine.length + 4; // '\n…\n\n' + metaLine
+        for (const line of lines) {
+            if (used + line.length + 1 > 1024) break;
+            kept.push(line);
+            used += line.length + 1;
+        }
+        value = `${kept.join('\n')}\n…\n\n${metaLine}`;
+    }
     return {
         name: poll.finished ? '📊 投票結果' : '📊 投票',
         value,
@@ -537,10 +548,10 @@ module.exports = {
         const hasImg = media.some(it => it.image && !it.video);
         const postType = poll ? 'poll' : (media.length === 0 ? 'text' : (hasVid && hasImg ? 'mixed' : hasVid ? 'video' : 'image'));
 
-        // 作者頭像；純文字貼文的 og:image 通常就是作者頭像，可作為備援。
+        // 作者頭像；無媒體貼文（純文字 / 投票）的 og:image 通常就是作者頭像，可作為備援。
         // 放在右上角 thumbnail，比 author icon 稍大且不會佔用大圖區。
         const profilePic = findProfilePic(found && found.obj, html, username)
-            || (postType === 'text' ? ogImage : null);
+            || (media.length === 0 ? ogImage : null);
 
         const imageItems = media.filter(it => it.image && !it.video);
         // 純圖片貼文：前 4 張放進 embed 圖片網格（同 URL 多 embed 合併，畫面上是同一個
