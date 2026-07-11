@@ -26,6 +26,7 @@ const THREADS_COLORS = {
     image: 0x0095F6, // 圖片貼文：藍
     video: 0xE1306C, // 影片貼文：桃紅
     mixed: 0x8A3AB9, // 圖片 + 影片混合：紫
+    poll:  0xFEE75C, // 投票貼文：黃
 };
 const MAX_ATTACH_PER_MSG = 10;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // Discord 未加成伺服器的上限 10MB，超過立即中斷下載
@@ -128,6 +129,7 @@ function splitObjects(s) {
 
 // 從一個 post/carousel item 物件取媒體（物件必須是已 parse 好的 JS 物件）
 function extractMediaFromObj(o) {
+    if (!o || typeof o !== 'object') return null;
     const ent = {};
     if (Array.isArray(o.video_versions) && o.video_versions.length) {
         let best = o.video_versions[0];
@@ -161,6 +163,12 @@ function extractMedia(obj) {
         if (items.length) return items;
     }
 
+    // Threads 也可能把轉貼 / link preview 的影片放在 text_post_app_info.linked_inline_media
+    // （例如單影片分享文）。這是貼文本身的媒體，不應該退回掃整個 chunk，否則會抓到留言媒體。
+    const linked = obj.text_post_app_info && obj.text_post_app_info.linked_inline_media;
+    const linkedMedia = extractMediaFromObj(linked);
+    if (linkedMedia) items.push(linkedMedia);
+
     const top = extractMediaFromObj(obj);
     if (top) items.push(top);
     return items;
@@ -186,21 +194,38 @@ function findPostObject(chunks, shortcode) {
         return score;
     };
 
-    function parseObjectsAroundCode(target) {
+    function blocksAroundCode(target) {
         const out = [];
+        const seenStarts = new Set();
         const pat = new RegExp(`"code":"${shortcode}"`, 'g');
         let m;
         while ((m = pat.exec(target)) !== null) {
-            let i = m.index;
-            while (i > 0 && target[i] !== '{') i--;
-            if (i <= 0) continue;
-            const blk = balancedBlock(target, i, '{', '}');
-            if (!blk) continue;
-            try { out.push(JSON.parse(target.slice(blk[0], blk[1]))); }
+            let tried = 0;
+            for (let i = m.index; i >= 0 && tried < 160; i--) {
+                if (target[i] !== '{') continue;
+                tried++;
+                if (seenStarts.has(i)) continue;
+                const blk = balancedBlock(target, i, '{', '}');
+                if (!blk) continue;
+                const text = target.slice(blk[0], blk[1]);
+                if (!text.includes(codeNeedle)) continue;
+                seenStarts.add(i);
+                out.push({ start: i, text });
+            }
+        }
+        // 從最小的候選物件開始；通常最小且含 code 的可解析區塊就是貼文主物件。
+        return out.sort((a, b) => a.text.length - b.text.length || a.start - b.start);
+    }
+
+    function parseObjectsAroundCode(target) {
+        const out = [];
+        for (const block of blocksAroundCode(target)) {
+            try { out.push(JSON.parse(block.text)); }
             catch { /* ignore malformed / non-standalone JSON object */ }
         }
         return out;
     }
+
 
     function regexExtractMedia(target) {
         const media = [];
@@ -270,12 +295,22 @@ function findPostObject(chunks, shortcode) {
         }
     }
 
+    // 如果已經成功 parse 到目標貼文物件，但 extractMedia 沒抽出媒體，
+    // 就視為純文字 / 投票 / 不支援的 attachment；不要再掃 wrapper，避免抓到留言媒體。
+    if (bestMatchedObj && bestMatchedObj.code === shortcode) return { obj: bestMatchedObj, media: [] };
+
     // 2) 如果 JSON.parse 沒抓到完整 post object，但含 shortcode 的 chunk 有媒體標記，
     //    才在「含 shortcode 的 chunks」內做 regex fallback；避免掃到頁面其他無關媒體。
     for (const target of exactTargets) {
         if (!hasMediaMarkers(target)) continue;
-        const media = regexExtractMedia(target);
-        if (media.length > 0) return { obj: bestMatchedObj, media };
+        const blocks = blocksAroundCode(target);
+        const postLikeBlocks = blocks.filter(b =>
+            b.text.includes('\"caption\"') || b.text.includes('\"text_post_app_info\"') || b.text.includes('\"media_type\"')
+        );
+        for (const block of (postLikeBlocks.length ? postLikeBlocks : blocks)) {
+            const media = regexExtractMedia(block.text);
+            if (media.length > 0) return { obj: bestMatchedObj, media };
+        }
     }
 
     // 3) 只要頁面內有 shortcode，就不要退回掃全頁其他媒體。
@@ -362,6 +397,54 @@ function findProfilePic(obj, html, username) {
     return m ? jstr(m[1]) : null;
 }
 
+function extractPoll(obj) {
+    const poll = obj && obj.caption_add_on && obj.caption_add_on.poll;
+    if (!poll || !Array.isArray(poll.tallies) || poll.tallies.length === 0) return null;
+    const tallies = poll.tallies
+        .filter(t => t && typeof t.text === 'string')
+        .map(t => ({ text: t.text, count: Number(t.count) || 0 }));
+    if (!tallies.length) return null;
+    return {
+        tallies,
+        total: tallies.reduce((sum, t) => sum + t.count, 0),
+        max: Math.max(...tallies.map(t => t.count), 0),
+        finished: poll.finished === true,
+        expiresAt: Number.isFinite(Number(poll.expires_at)) ? Number(poll.expires_at) : null,
+        viewerCanVote: poll.viewer_can_vote === true,
+    };
+}
+
+function escapeEmbedText(s) {
+    return String(s || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/([*_`~|])/g, '\\$1')
+        .replace(/</g, '‹')
+        .replace(/>/g, '›');
+}
+
+function formatPollField(poll) {
+    if (!poll) return null;
+    const barWidth = 12;
+    const fmt = n => Number(n || 0).toLocaleString('en-US');
+    const lines = poll.tallies.map((t, idx) => {
+        const pct = poll.total > 0 ? (t.count / poll.total) * 100 : 0;
+        const fill = poll.max > 0 ? Math.max(1, Math.round((t.count / poll.max) * barWidth)) : 0;
+        const bar = '█'.repeat(fill) + '░'.repeat(barWidth - fill);
+        return `${idx + 1}. **${escapeEmbedText(t.text)}**\n   \`${bar}\` **${pct.toFixed(1)}%** · ${fmt(t.count)} 票`;
+    });
+    const meta = [`共 **${fmt(poll.total)}** 票`];
+    if (poll.finished) meta.push('已結束');
+    else if (poll.expiresAt) meta.push(`結束時間 <t:${Math.floor(poll.expiresAt)}:R>`);
+    else if (poll.viewerCanVote) meta.push('仍可投票');
+
+    let value = `${lines.join('\n')}\n\n${meta.join(' • ')}`;
+    if (value.length > 1024) value = value.slice(0, 1020) + '…';
+    return {
+        name: poll.finished ? '📊 投票結果' : '📊 投票',
+        value,
+    };
+}
+
 // -------------------- main --------------------
 
 module.exports = {
@@ -445,11 +528,14 @@ module.exports = {
         }
         if (caption.length > 1900) caption = caption.slice(0, 1900) + '…';
 
+        const poll = extractPoll(found && found.obj);
+        const pollField = formatPollField(poll);
+
         // embed
         // 貼文類型 → 對應顏色（影片項目會同時帶封面圖，判斷以 video 優先）
         const hasVid = media.some(it => it.video);
         const hasImg = media.some(it => it.image && !it.video);
-        const postType = media.length === 0 ? 'text' : (hasVid && hasImg ? 'mixed' : hasVid ? 'video' : 'image');
+        const postType = poll ? 'poll' : (media.length === 0 ? 'text' : (hasVid && hasImg ? 'mixed' : hasVid ? 'video' : 'image'));
 
         // 作者頭像；純文字貼文的 og:image 通常就是作者頭像，可作為備援。
         // 放在右上角 thumbnail，比 author icon 稍大且不會佔用大圖區。
@@ -468,6 +554,7 @@ module.exports = {
             .setAuthor({ name: `${displayName} (@${username})`, url: cleanUrl });
         if (profilePic) embed.setThumbnail(profilePic);
         if (caption && caption.trim()) embed.setDescription(caption.trim());
+        if (pollField) embed.addFields(pollField);
 
         // 媒體呈現規則：
         // - 純圖片：前 4 張進 embed 圖片網格（不上傳），第 5 張起改用附件。
