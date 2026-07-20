@@ -51,9 +51,7 @@ module.exports = {
 			let urlObj = new URL(finalUrl);
 
 			// 破解 login 攔截，取 next 參數裡真正的跳轉網址
-			let loginWalled = false;
 			if (urlObj.pathname.includes('/login')) {
-				loginWalled = true;
 				const nextParam = urlObj.searchParams.get('next');
 				if (nextParam) {
 					finalUrl = nextParam;
@@ -96,38 +94,37 @@ module.exports = {
 					}
 				}
 			} else {
-				// ---- Fallback：被 login 擋住（多半是「相片」連結）----
+				// ---- Fallback：無 canonical（被 login 擋住，如 photo、story.php、pfbid 等）----
 				const fbid = urlObj.searchParams.get('fbid');
 				const setParam = urlObj.searchParams.get('set');
 
-				if (fbid || urlObj.pathname.includes('/photo')) {
-					// 若 set=pcb.<母貼文id>，直接由 set 還原母貼文
-					if (setParam && setParam.startsWith('pcb.')) {
-						const parentId = setParam.replace('pcb.', '');
-						const parts = urlObj.pathname.split('/').filter(Boolean);
-						const owner = parts[0] && parts[0] !== 'photo.php' ? parts[0] : null;
-						if (owner) {
-							resultUrl = `https://www.facebook.com/${owner}/posts/${parentId}`;
+				// 若 set=pcb.<母貼文id>，直接由 set 還原母貼文
+				if (setParam && setParam.startsWith('pcb.')) {
+					const parentId = setParam.replace('pcb.', '');
+					const parts = urlObj.pathname.split('/').filter(Boolean);
+					const owner = parts[0] && parts[0] !== 'photo.php' ? parts[0] : null;
+					if (owner) {
+						resultUrl = `https://www.facebook.com/${owner}/posts/${parentId}`;
+					}
+				}
+
+				// 嘗試用 post.php 外嵌解析取得母貼文（可破解 photo.php, story.php, pfbid 等）
+				if (!resultUrl) {
+					try {
+						const embedResult = await fetchEmbed(cleanUrl, headers);
+						if (embedResult) {
+							resultUrl = embedResult;
 						}
-					}
+					} catch {}
+				}
 
-					// 嘗試用 post.php 外嵌取得母貼文
-					if (!resultUrl) {
-						try {
-							const embedResult = await fetchEmbed(cleanUrl, headers);
-							if (embedResult) {
-								resultUrl = embedResult;
-							}
-						} catch {}
-					}
-
-					// 最終備援：返回相片頁乾淨網址
-					if (!resultUrl) {
+				// 最終備援：有 fbid 時回相片頁乾淨網址，否則回 cleanUrl
+				if (!resultUrl) {
+					if (fbid) {
 						resultUrl = `https://www.facebook.com/photo.php?fbid=${fbid}${setParam ? '&set=' + setParam : ''}&type=3`;
+					} else {
+						resultUrl = cleanUrl;
 					}
-				} else {
-					// 最後備援：story_fbid / 路徑末段
-					resultUrl = cleanUrl;
 				}
 			}
 
