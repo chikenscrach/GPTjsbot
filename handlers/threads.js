@@ -1,5 +1,6 @@
 // handlers/threads.js
 // 直接在 bot 裡抓 Threads 貼文（支援純文字/單圖/單影片/多圖/多影片/圖文影片混合）。
+// 網址支援 /@user/post/<code> 與 App 分享短網址 /share/<id>（302 導向前者後照常解析）。
 //
 // 做法：
 //   1. 用「完整瀏覽器 headers」打 threads.com SSR，拿到含有 data-sjs 完整 JSON 區塊的 HTML。
@@ -19,6 +20,8 @@ const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const FETCH_TIMEOUT = 20000;
 const FETCH_MEDIA_TIMEOUT = 25000;
 const THREADS_POST_RE = /^\/@([A-Za-z0-9._]+)\/post\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/;
+// 分享短網址（App 內「複製連結」產生）：/share/<id>，會 302 重導向到 /@user/post/<code>
+const THREADS_SHARE_RE = /^\/share\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/;
 
 // embed 顏色依貼文類型區分
 const THREADS_COLORS = {
@@ -470,16 +473,22 @@ module.exports = {
         let parsed;
         try { parsed = new URL(url); } catch { return null; }
         const m = parsed.pathname.match(THREADS_POST_RE);
-        if (!m) return null;
-        const [, usernameFromUrl, postCode] = m;
-        const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
+        const shareM = m ? null : parsed.pathname.match(THREADS_SHARE_RE);
+        if (!m && !shareM) return null;
+
+        // share 短網址要等 302 重導向後才知道 username / postCode
+        let usernameFromUrl = m ? m[1] : null;
+        let postCode = m ? m[2] : null;
+        const fetchUrl = m
+            ? `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`
+            : `https://www.threads.com/share/${shareM[1]}/`;
 
         let html;
         const c = new AbortController();
         // timer 在 finally 才清除，讓 timeout 涵蓋 HTML body 的完整下載
         const t = setTimeout(() => c.abort(), FETCH_TIMEOUT);
         try {
-            const resp = await fetch(cleanUrl, {
+            const resp = await fetch(fetchUrl, {
                 headers: BROWSER_HEADERS,
                 redirect: 'follow',
                 signal: c.signal,
@@ -491,6 +500,15 @@ module.exports = {
                 return { type: 'notice', message: '網址錯誤或脆文已刪除' };
             }
             if (finalUrl.includes('error=') || finalUrl.includes('/login')) return null;
+            if (shareM) {
+                // 從重導向後的最終網址解析 username / postCode（帶 ?xmt=… 追蹤參數）
+                let fp;
+                try { fp = new URL(finalUrl); } catch { return null; }
+                const fm = fp.pathname.match(THREADS_POST_RE);
+                if (!fm) return null; // share 連結沒有導向貼文頁（可能已失效）
+                usernameFromUrl = fm[1];
+                postCode = fm[2];
+            }
             html = await resp.text();
         } catch (err) {
             console.warn('[threads] fetch 失敗：', err.message);
@@ -498,6 +516,7 @@ module.exports = {
         } finally {
             clearTimeout(t);
         }
+        const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
 
         const ogTitle = pickMeta(html, 'og:title') || '';
         const ogDesc  = pickMeta(html, 'og:description') || '';
