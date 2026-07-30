@@ -59,6 +59,10 @@ module.exports = {
 			.flatMap(i => Array.isArray(i.files) ? i.files : []);
 		const mainFiles = allFiles.slice(0, MAX_ATTACH_PER_MSG);
 		const overflowFiles = allFiles.slice(MAX_ATTACH_PER_MSG);
+		// handler 附帶的按鈕列（如 Threads 的「開啟原文」）；Discord 單一訊息最多 5 列
+		const mainComponents = embedItems
+			.flatMap(i => Array.isArray(i.components) ? i.components : [])
+			.slice(0, 5);
 
 		// notice 只是提示訊息，不算實際轉換，不需要關閉原訊息的 embed
 		const hasPayload =
@@ -77,6 +81,7 @@ module.exports = {
 		};
 		if (mainEmbeds.length) payload.embeds = mainEmbeds;
 		if (mainFiles.length)  payload.files  = mainFiles;
+		if (mainComponents.length) payload.components = mainComponents;
 		const contentParts = [...convertedUrls, ...noticeTexts];
 		if (contentParts.length) payload.content = contentParts.join('\n');
 

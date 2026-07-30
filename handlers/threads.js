@@ -13,9 +13,9 @@
 //   4. 超過 10 個附件時分批經由 additionalMessages 回傳，由 messageCreate 逐條送出。
 //
 // 回傳格式：
-//   { type:'embed', embed, embeds?, files, originalUrl, additionalMessages? }
+//   { type:'embed', embed, embeds?, files, components?, originalUrl, additionalMessages? }
 
-const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
 const FETCH_TIMEOUT = 20000;
 const FETCH_MEDIA_TIMEOUT = 25000;
@@ -655,12 +655,21 @@ module.exports = {
             });
         }
 
+        // 開啟原文的連結按鈕（cleanUrl 已去除 ?xmt=… 等追蹤參數）
+        const linkRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setStyle(ButtonStyle.Link)
+                .setLabel('開啟原文')
+                .setURL(cleanUrl)
+        );
+
         return {
             type: 'embed',
             embed: embed.toJSON(),
             embeds: embeds.map(e => e.toJSON()),
             files: mainFiles,
             additionalMessages,
+            components: [linkRow.toJSON()],
             originalUrl: cleanUrl,
         };
     },
