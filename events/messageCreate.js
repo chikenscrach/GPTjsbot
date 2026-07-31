@@ -47,7 +47,8 @@ module.exports = {
 
 		const convertedUrls = items.filter(i => i.type === 'url').map(i => i.value);
 		const embedItems  = items.filter(i => i.type === 'embed' && (i.embed || Array.isArray(i.embeds)));
-		const noticeTexts = items.filter(i => i.type === 'notice').map(i => i.message);
+		const noticeItems = items.filter(i => i.type === 'notice');
+		const noticeTexts = noticeItems.map(i => i.message);
 
 		// 準備主訊息
 		const mainEmbeds = embedItems
@@ -59,8 +60,9 @@ module.exports = {
 			.flatMap(i => Array.isArray(i.files) ? i.files : []);
 		const mainFiles = allFiles.slice(0, MAX_ATTACH_PER_MSG);
 		const overflowFiles = allFiles.slice(MAX_ATTACH_PER_MSG);
-		// handler 附帶的按鈕列（如 Threads 的「開啟原文」）；Discord 單一訊息最多 5 列
-		const mainComponents = embedItems
+		// handler 附帶的按鈕列（如 Threads 的「開啟原文」，notice 提示也可能附帶）；
+		// Discord 單一訊息最多 5 列
+		const mainComponents = [...embedItems, ...noticeItems]
 			.flatMap(i => Array.isArray(i.components) ? i.components : [])
 			.slice(0, 5);
 

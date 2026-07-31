@@ -1,24 +1,30 @@
 // handlers/threads.js
-// 直接在 bot 裡抓 Threads 貼文（支援純文字/單圖/單影片/多圖/多影片/圖文影片混合）。
+// 直接在 bot 裡抓 Threads 貼文（支援純文字/單圖/單影片/多圖/多影片/圖文影片混合/引用轉發）。
 // 網址支援 /@user/post/<code> 與 App 分享短網址 /share/<id>（302 導向前者後照常解析）。
 //
 // 做法：
 //   1. 用「完整瀏覽器 headers」打 threads.com SSR，拿到含有 data-sjs 完整 JSON 區塊的 HTML。
 //      （精簡 headers 只會回 ~260KB 的頁面，缺少 video_versions / image_versions2 / carousel_media）。
+//      redirect 逐跳手動追蹤：需登入的貼文會被 302 到 ?error=invalid_post，但 share 短網址
+//      中途那一跳是真正的貼文網址，要先記下來才能在提示訊息附上「開啟原文」按鈕。
 //   2. 從 <script type="application/json" data-sjs> 裡定位貼文主物件，抽出媒體清單：
 //      - carousel_media 陣列存在 → 逐項抽 image 或 video
 //      - 否則 → 頂層 image_versions2 / video_versions 視為單一媒體
+//      - 引用轉發（quote post）：外層貼文的媒體欄位是 null，引用內容（含媒體）掛在
+//        text_post_app_info.share_info.quoted_attachment_post，一併抽出。
 //   3. 純圖片貼文：前 4 張用同 URL 多 embed 合併成單一 embed 的圖片網格（不需下載）；
 //      第 5 張起、以及所有影片與含影片貼文的圖片，下載後當附件上傳（影片原生播放）。
 //   4. 超過 10 個附件時分批經由 additionalMessages 回傳，由 messageCreate 逐條送出。
 //
 // 回傳格式：
 //   { type:'embed', embed, embeds?, files, components?, originalUrl, additionalMessages? }
+//   { type:'notice', message, components? }（貼文需登入 / 已刪除等提示）
 
 const { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
 const FETCH_TIMEOUT = 20000;
 const FETCH_MEDIA_TIMEOUT = 25000;
+const MAX_REDIRECTS = 5;
 const THREADS_POST_RE = /^\/@([A-Za-z0-9._]+)\/post\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/;
 // 分享短網址（App 內「複製連結」產生）：/share/<id>，會 302 重導向到 /@user/post/<code>
 const THREADS_SHARE_RE = /^\/share\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/;
@@ -323,6 +329,31 @@ function findPostObject(chunks, shortcode) {
     return { obj: null, media: regexExtractMedia(fallbackTarget) };
 }
 
+// 區分「私人帳號需登入」與「貼文已刪除」：
+// 私人帳號的個人頁（threads.com/@username）會被 302 到 /login，公開帳號則正常載入。
+// 回傳 'login' | 'public' | 'unknown'
+async function checkProfileAccess(username) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    try {
+        const resp = await fetch(`https://www.threads.com/@${username}`, {
+            headers: BROWSER_HEADERS,
+            redirect: 'manual',
+            signal: controller.signal,
+        });
+        if (resp.body) resp.body.cancel().catch(() => {});
+        if (resp.status >= 300 && resp.status < 400) {
+            const loc = resp.headers.get('location') || '';
+            return loc.includes('/login') ? 'login' : 'unknown';
+        }
+        return resp.ok ? 'public' : 'unknown';
+    } catch {
+        return 'unknown';
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function fetchMedia(url, kind) {
     const controller = new AbortController();
     // timer 移到 finally 才清除，讓 timeout 涵蓋整個 body 下載，不只等到 headers
@@ -484,37 +515,70 @@ module.exports = {
             : `https://www.threads.com/share/${shareM[1]}/`;
 
         let html;
+        let invalidPost = false;
+        let finalUrl = fetchUrl;
         const c = new AbortController();
         // timer 在 finally 才清除，讓 timeout 涵蓋 HTML body 的完整下載
         const t = setTimeout(() => c.abort(), FETCH_TIMEOUT);
         try {
-            const resp = await fetch(fetchUrl, {
-                headers: BROWSER_HEADERS,
-                redirect: 'follow',
-                signal: c.signal,
-            });
-            if (!resp.ok) return null;
-            const finalUrl = resp.url || '';
-            // 被重導向到 ?error=invalid_post：貼文不存在或已刪除，回覆使用者
+            // 手動逐跳追蹤 redirect：需登入的貼文最後會被 302 到 ?error=invalid_post，
+            // 但 share 短網址中途那一跳是真正的貼文網址（/@user/post/<code>?xmt=…）。
+            // redirect:'follow' 只看得到最後一跳，中間的 username / postCode 就拿不到了。
+            let resp = null;
+            for (let hop = 0; hop < MAX_REDIRECTS; hop++) {
+                resp = await fetch(finalUrl, {
+                    headers: BROWSER_HEADERS,
+                    redirect: 'manual',
+                    signal: c.signal,
+                });
+                if (resp.status < 300 || resp.status >= 400) break;
+                const loc = resp.headers.get('location');
+                if (resp.body) resp.body.cancel().catch(() => {});
+                if (!loc) return null;
+                resp = null; // 超過 MAX_REDIRECTS 時視為失敗
+                finalUrl = new URL(loc, finalUrl).href;
+                const hopM = new URL(finalUrl).pathname.match(THREADS_POST_RE);
+                if (hopM) { usernameFromUrl = hopM[1]; postCode = hopM[2]; }
+            }
+            if (!resp) return null;
+            // 被重導向到 ?error=invalid_post：需登入或貼文已刪除，離開 try 後再處理
             if (finalUrl.includes('error=invalid_post')) {
-                return { type: 'notice', message: '網址錯誤或脆文已刪除' };
+                if (resp.body) resp.body.cancel().catch(() => {});
+                invalidPost = true;
+            } else {
+                if (finalUrl.includes('error=') || finalUrl.includes('/login')) return null;
+                if (!resp.ok) return null;
+                // share 連結沒有導向貼文頁（可能已失效）
+                if (!usernameFromUrl || !postCode) return null;
+                html = await resp.text();
             }
-            if (finalUrl.includes('error=') || finalUrl.includes('/login')) return null;
-            if (shareM) {
-                // 從重導向後的最終網址解析 username / postCode（帶 ?xmt=… 追蹤參數）
-                let fp;
-                try { fp = new URL(finalUrl); } catch { return null; }
-                const fm = fp.pathname.match(THREADS_POST_RE);
-                if (!fm) return null; // share 連結沒有導向貼文頁（可能已失效）
-                usernameFromUrl = fm[1];
-                postCode = fm[2];
-            }
-            html = await resp.text();
         } catch (err) {
             console.warn('[threads] fetch 失敗：', err.message);
             return null;
         } finally {
             clearTimeout(t);
+        }
+
+        if (invalidPost) {
+            // 沒拿到貼文網址（share 短網址直接失效）→ 只能回覆通用訊息
+            if (!usernameFromUrl || !postCode) {
+                return { type: 'notice', message: '網址錯誤或脆文已刪除' };
+            }
+            const access = await checkProfileAccess(usernameFromUrl);
+            // 個人頁公開但貼文打不開 → 貼文本身已刪除或網址錯誤
+            if (access === 'public') {
+                return { type: 'notice', message: '網址錯誤或脆文已刪除' };
+            }
+            const noticeRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setStyle(ButtonStyle.Link)
+                    .setLabel('開啟原文')
+                    .setURL(`https://www.threads.com/@${usernameFromUrl}/post/${postCode}`)
+            );
+            const message = access === 'login'
+                ? '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）'
+                : '🔒 無法檢視此貼文：可能需要登入 Threads，或貼文已刪除';
+            return { type: 'notice', message, components: [noticeRow.toJSON()] };
         }
         const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
 
@@ -537,6 +601,31 @@ module.exports = {
         const chunks = extractSjsChunks(html);
         const found = findPostObject(chunks, postCode);
         let media = (found && found.media) || [];
+
+        // 引用轉發（quote post）：外層貼文自己的媒體欄位是 null，引用內容掛在
+        // share_info.quoted_attachment_post（quoted_post 實測一律是 null，仍留作備援）。
+        // 引用的媒體併入媒體清單、文字之後以獨立 field 呈現。
+        const shareInfo = found && found.obj && found.obj.text_post_app_info
+            && found.obj.text_post_app_info.share_info;
+        const quotedObj = shareInfo
+            && (shareInfo.quoted_attachment_post || shareInfo.quoted_post);
+        let quoted = null;
+        if (quotedObj && typeof quotedObj === 'object') {
+            const qUsername = quotedObj.user && typeof quotedObj.user.username === 'string'
+                ? quotedObj.user.username : null;
+            const qMedia = extractMedia(quotedObj);
+            const qCaption = quotedObj.caption && typeof quotedObj.caption.text === 'string'
+                ? quotedObj.caption.text : '';
+            let qUrl = typeof quotedObj.permalink === 'string' && quotedObj.permalink
+                ? quotedObj.permalink : null;
+            if (!qUrl && qUsername && typeof quotedObj.code === 'string') {
+                qUrl = `https://www.threads.com/@${qUsername}/post/${quotedObj.code}`;
+            }
+            if (qMedia.length || qCaption) {
+                quoted = { username: qUsername, media: qMedia, caption: qCaption, url: qUrl };
+                media = media.concat(qMedia);
+            }
+        }
 
         // 去重
         const seen = new Set();
@@ -584,6 +673,16 @@ module.exports = {
             .setAuthor({ name: `${displayName} (@${username})`, url: cleanUrl });
         if (profilePic) embed.setThumbnail(profilePic);
         if (caption && caption.trim()) embed.setDescription(caption.trim());
+        if (quoted) {
+            // Discord field value 上限 1024
+            let qv = quoted.caption.trim();
+            if (qv.length > 1000) qv = qv.slice(0, 1000) + '…';
+            if (!qv) qv = quoted.media.some(it => it.video) ? '（影片貼文）' : '（圖片貼文）';
+            embed.addFields({
+                name: quoted.username ? `↪️ 引用 @${quoted.username} 的貼文` : '↪️ 引用貼文',
+                value: qv,
+            });
+        }
         if (pollField) embed.addFields(pollField);
 
         // 媒體呈現規則：
@@ -662,6 +761,14 @@ module.exports = {
                 .setLabel('開啟原文')
                 .setURL(cleanUrl)
         );
+        if (quoted && quoted.url) {
+            linkRow.addComponents(
+                new ButtonBuilder()
+                    .setStyle(ButtonStyle.Link)
+                    .setLabel('開啟引用原文')
+                    .setURL(quoted.url)
+            );
+        }
 
         return {
             type: 'embed',
