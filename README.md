@@ -20,6 +20,7 @@
 *   🤖 **AI 智慧聊天**：整合 **Groq API**，支援極速的 Llama / Mixtral 等模型對話，內建 SQLite 記憶對話上下文，自動翻譯繁體中文，且**完美支援長訊息自動分段發送**，徹底防範 Discord 2000 字元長度限制。
 *   ⚙️ **可自訂對話模型**：模型不再寫死！開發者可在 `.env` 檔案中設定全域預設模型，使用者也可以直接在 `/chat` 指令的選單中即時切換不同的官方模型（如極速的 Llama 8B、強大的 Llama 3.3 70B、GPT OSS 或是 Qwen3 等官方支援模型）。
 *   🔗 **自動網址轉換 (Embed Fixer)**：當使用者發送特定平台（如 X/Twitter, Instagram, Facebook）網址時，機器人會自動修正為可直接預覽影片/多圖的替代服務網址（例如 `fixvx.com`, `kkinstagram.com` 等）。
+*   🎯 **Discord 任務查詢 (Quest)**：即時抓取社群維護的任務資料，支援分頁列表、名稱／獎勵／ID／月份搜尋與 Orb 統計，並可用**獎勵類型、地區限制、年齡限制、連動任務等多重條件交叉篩選**，快速找出「還沒過期、有 Orb 又沒有地區限制」的任務。
 *   ⏰ **輕量化提醒系統**：透過內建的 SQLite 與排程器，隨時設定個人/頻道的定時提醒事項。
 *   🐋 **生產級 Docker 支援**：基於 `node:20-slim` 進行多階段建置 (Multi-stage build)，內建 `tini` 防範殭屍進程，並以非 root 權限 (`appuser`) 安全運行。已自動發佈至 **GitHub Container Registry (GHCR)**。
 *   🧩 **模組化架構**：易於擴充，只需在 `commands/` 或 `handlers/` 目錄新增檔案，即可無痛增加新指令與新網址解析規則。
@@ -134,6 +135,7 @@ GPTjsbot/
 ├── commands/               # Slash 指令模組 (自動讀取)
 │   ├── chat.js             # AI 聊天 (/chat，支援自訂模型選單)
 │   ├── reminder.js         # 設定提醒 (/reminder)
+│   ├── quest.js            # Discord 任務查詢 (/quest，列表／搜尋／統計)
 │   └── ...                 # ping, avatar, info, status, help
 ├── core/                   # 核心調度邏輯
 │   ├── chat.js             # Groq API 封裝與可配置模型邏輯
@@ -165,6 +167,16 @@ GPTjsbot/
     *   `message`：對話內容。
     *   `model`（選填）：直接在選單中覆寫預設設定，即時選用不同模型（如 Llama 3.3 70B、Llama 3.1 8B、GPT OSS 120B、Qwen 3.6 27B 等）。
 *   `/reminder [time] [message] [channel]`：設定定時提醒，時間格式支援 `10m`、`2h`、`1d` 等。
+*   `/quest list`：顯示 Discord 任務列表，預設只列出**進行中**的任務，並依開始時間由新到舊排序。
+    *   `page`（選填）：頁數。
+    *   `expired`（選填）：一併列出已過期的任務。
+    *   `expiring`（選填）：改依到期時間排序（最快到期的排在最前面）。
+    *   `reward_type`（選填）：只看指定獎勵類型的任務（`Orb`、`頭像裝飾`、`Nitro`、`兌換碼`、`遊戲內獎勵`）。
+    *   `regions` / `age` / `linked` / `restricted`（選填）：只看有**地區限制**／**年齡限制**／**連動任務**／**任何限制**的任務。
+    *   💡 **以上條件皆可自由組合，同時指定時必須全部符合 (AND)**。例如 `/quest list reward_type:Orb regions:True` 會列出「有地區限制的 Orb 任務」；再加上 `expiring:True` 就能優先看到快到期的那幾個。
+*   `/quest search`：搜尋任務，`name`（名稱）、`reward`（獎勵名稱）、`id`（任務 ID）、`month`（開始月份，格式 `MM/YY`，例如 `07/26`）四選一填寫。
+    *   依**名稱**或**月份**搜尋時固定包含已過期任務；依**獎勵**或 **ID** 搜尋則可用 `expired` 決定是否納入。
+*   `/quest stats [type]`：顯示任務統計，可選擇「全部統計」（任務總數、各獎勵類型與任務類型分佈）或「Orb 統計」（Orb 總數、進行中可取得的 Orb 數量）。
 *   `/status`：診斷並顯示當前系統狀態（包含記憶體佔用、運行時間與延遲）。
 *   `/ping`：測試機器人與 Discord API 的延遲。
 *   `/avatar [user]`：取得指定使用者的頭像。

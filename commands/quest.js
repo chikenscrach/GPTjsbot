@@ -73,6 +73,47 @@ const normalizeRegions = (regions) => {
   return null;
 };
 
+const countRegions = (regions) => {
+  const nr = normalizeRegions(regions);
+  if (!nr) return 0;
+  return nr.type === 'include'
+    ? nr.list.length
+    : nr.include.length + nr.exclude.length;
+};
+
+// 一個任務可能同時有自己的限制與連動任務的限制，顯示與篩選共用同一套解析規則，
+// 避免篩出來的任務與畫面上顯示的限制對不起來
+const resolveRestriction = (id, restrictions, restrictionsMap) => {
+  const direct = restrictionsMap.get(id);
+  if (direct && countRegions(direct.regions) > 0) return direct;
+  return restrictions.find((r) => r.replacement_id === id) || direct || null;
+};
+
+const hasRegionLimit = (r) =>
+  r?.is_global === false && countRegions(r.regions) > 0;
+
+const hasAgeLimit = (r) => r?.show_age_gate === true;
+
+const isLinkedQuest = (id, r, restrictions) =>
+  !!(r?.replacement_id || restrictions.some((x) => x.replacement_id === id));
+
+// 獎勵類型（對應資料中的 rewards[].type）
+const REWARD_TYPES = {
+  orbs: 4,
+  decoration: 3,
+  nitro: 5,
+  code: 1,
+  in_game: 2,
+};
+
+const hasRewardType = (q, type) =>
+  getRewards(q).some((r) =>
+    // 部分 Orb 獎勵資料沒有 type 欄位，改用 orb_quantity 一併判斷
+    type === REWARD_TYPES.orbs
+      ? r.type === REWARD_TYPES.orbs || r.orb_quantity > 0
+      : r.type === type
+  );
+
 // 舊格式的任務資料沒有 config 欄位，統一轉成新格式
 const normalizeQuest = (q) => {
   if (q.config) return q;
@@ -240,32 +281,19 @@ function buildQuestPages(filtered, restrictions, restrictionsMap, now) {
 
     const isExpired = Date.parse(cfg?.expires_at) <= now;
 
-    let restriction = restrictionsMap.get(q.id);
-    if (!restriction || !restriction.regions?.length) {
-      const linked = restrictions.find((r) => r.replacement_id === q.id);
-      if (linked) restriction = linked;
-    }
-
-    const ageRestricted = restriction?.show_age_gate === true;
-    const isLinked =
-      restriction?.replacement_id ||
-      restrictions.some((r) => r.replacement_id === q.id);
+    const restriction = resolveRestriction(q.id, restrictions, restrictionsMap);
+    const ageRestricted = hasAgeLimit(restriction);
+    const isLinked = isLinkedQuest(q.id, restriction, restrictions);
 
     const regionsLines = [];
-    const normalizedR = normalizeRegions(restriction?.regions);
-
-    if (restriction?.is_global === false && normalizedR) {
-      if (normalizedR.type === 'include') {
-        const list = normalizedR.list.map((r) => REGION_FLAGS[r] || r).join(', ');
-        regionsLines.push(`包含：${list}`);
-      }
-      if (normalizedR.type === 'advanced') {
-        const inc = normalizedR.include || [];
-        const exc = normalizedR.exclude || [];
-        if (inc.length)
-          regionsLines.push(`包含：${inc.map((r) => REGION_FLAGS[r] || r).join(', ')}`);
-        if (exc.length)
-          regionsLines.push(`排除：${exc.map((r) => REGION_FLAGS[r] || r).join(', ')}`);
+    if (hasRegionLimit(restriction)) {
+      const nr = normalizeRegions(restriction.regions);
+      const flags = (list) => list.map((r) => REGION_FLAGS[r] || r).join(', ');
+      if (nr.type === 'include') {
+        regionsLines.push(`包含：${flags(nr.list)}`);
+      } else {
+        if (nr.include.length) regionsLines.push(`包含：${flags(nr.include)}`);
+        if (nr.exclude.length) regionsLines.push(`排除：${flags(nr.exclude)}`);
       }
     }
 
@@ -329,14 +357,24 @@ module.exports = {
           o.setName('expiring').setDescription('改依到期時間排序（最快到期的在前）'))
         .addStringOption((o) =>
           o
-            .setName('filter')
-            .setDescription('進階篩選')
+            .setName('reward_type')
+            .setDescription('僅顯示指定獎勵類型的任務')
             .addChoices(
-              { name: '僅顯示有限制的任務', value: 'restricted' },
-              { name: '僅顯示有地區限制的任務', value: 'regions' },
-              { name: '僅顯示有年齡限制的任務', value: 'age' },
-              { name: '僅顯示連動任務', value: 'linked' },
-            )))
+              { name: 'Orb', value: 'orbs' },
+              { name: '頭像裝飾', value: 'decoration' },
+              { name: 'Nitro', value: 'nitro' },
+              { name: '兌換碼', value: 'code' },
+              { name: '遊戲內獎勵', value: 'in_game' },
+            ))
+        // 以下篩選條件可任意組合，同時指定時需全部符合（AND）
+        .addBooleanOption((o) =>
+          o.setName('regions').setDescription('僅顯示有地區限制的任務'))
+        .addBooleanOption((o) =>
+          o.setName('age').setDescription('僅顯示有年齡限制的任務'))
+        .addBooleanOption((o) =>
+          o.setName('linked').setDescription('僅顯示連動任務'))
+        .addBooleanOption((o) =>
+          o.setName('restricted').setDescription('僅顯示有任何限制的任務')))
     .addSubcommand((sub) =>
       sub
         .setName('search')
@@ -473,41 +511,29 @@ module.exports = {
       );
     });
 
-    /* ── 限制篩選 ── */
+    /* ── 獎勵與限制篩選（可複選，同時指定時需全部符合） ── */
 
-    const filter = sub === 'list' ? interaction.options.getString('filter') : null;
+    if (sub === 'list') {
+      const rewardType = REWARD_TYPES[interaction.options.getString('reward_type')];
+      const onlyRegions = interaction.options.getBoolean('regions');
+      const onlyAge = interaction.options.getBoolean('age');
+      const onlyLinked = interaction.options.getBoolean('linked');
+      const onlyRestricted = interaction.options.getBoolean('restricted');
 
-    if (filter === 'restricted') {
-      filtered = filtered.filter((q) => {
-        let r = restrictionsMap.get(q.id);
-        if (!r) r = restrictions.find((x) => x.replacement_id === q.id);
-        return !!r;
-      });
-    } else if (filter === 'regions') {
-      // regions 有陣列與 {include, exclude} 兩種格式，統一正規化後再判斷
-      filtered = filtered.filter((q) => {
-        let r = restrictionsMap.get(q.id);
-        if (!r) r = restrictions.find((x) => x.replacement_id === q.id);
-        if (!r || r.is_global !== false) return false;
-        const nr = normalizeRegions(r.regions);
-        if (!nr) return false;
-        if (nr.type === 'include') return nr.list.length > 0;
-        return nr.include.length > 0 || nr.exclude.length > 0;
-      });
-    } else if (filter === 'age') {
-      filtered = filtered.filter((q) => {
-        let r = restrictionsMap.get(q.id);
-        if (!r) r = restrictions.find((x) => x.replacement_id === q.id);
-        return r?.show_age_gate === true;
-      });
-    } else if (filter === 'linked') {
-      filtered = filtered.filter((q) => {
-        const r = restrictionsMap.get(q.id);
-        return (
-          r?.replacement_id ||
-          restrictions.some((x) => x.replacement_id === q.id)
-        );
-      });
+      if (rewardType) {
+        filtered = filtered.filter((q) => hasRewardType(q, rewardType));
+      }
+
+      if (onlyRegions || onlyAge || onlyLinked || onlyRestricted) {
+        filtered = filtered.filter((q) => {
+          const r = resolveRestriction(q.id, restrictions, restrictionsMap);
+          if (onlyRestricted && !r) return false;
+          if (onlyRegions && !hasRegionLimit(r)) return false;
+          if (onlyAge && !hasAgeLimit(r)) return false;
+          if (onlyLinked && !isLinkedQuest(q.id, r, restrictions)) return false;
+          return true;
+        });
+      }
     }
 
     /* ── 過期篩選 ── */
