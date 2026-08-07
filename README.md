@@ -22,6 +22,7 @@
 *   🔗 **自動網址轉換 (Embed Fixer)**：當使用者發送特定平台（如 X/Twitter, Instagram, Facebook）網址時，機器人會自動修正為可直接預覽影片/多圖的替代服務網址（例如 `fixvx.com`, `kkinstagram.com` 等）。
 *   🎯 **Discord 任務查詢 (Quest)**：即時抓取社群維護的任務資料，支援分頁列表、名稱／獎勵／ID／月份搜尋與 Orb 統計，並可用**獎勵類型、地區限制、年齡限制、連動任務等多重條件交叉篩選**，快速找出「還沒過期、有 Orb 又沒有地區限制」的任務。
 *   ⏰ **輕量化提醒系統**：透過內建的 SQLite 與排程器，隨時設定個人/頻道的定時提醒事項。
+*   📋 **伺服器事件日誌 (Logger)**：可選擇性啟用的事件監測系統，由伺服器管理員指定一個頻道接收成員上線/下線、訊息刪除、批次刪除與訊息編輯等通知，支援排除特定頻道與機器人事件；訊息已在快取中時可附帶原文，未快取時仍會記錄可取得的 metadata 並清楚標示內容未知。
 *   🐋 **生產級 Docker 支援**：基於 `node:20-slim` 進行多階段建置 (Multi-stage build)，內建 `tini` 防範殭屍進程，並以非 root 權限 (`appuser`) 安全運行。已自動發佈至 **GitHub Container Registry (GHCR)**。
 *   🧩 **模組化架構**：易於擴充，只需在 `commands/` 或 `handlers/` 目錄新增檔案，即可無痛增加新指令與新網址解析規則。
 
@@ -34,10 +35,17 @@
 *   **Groq API Key**：請至 [Groq Console](https://console.groq.com/) 免費申請。
 
 ### 2. 開啟 Discord Intents ⚠️（重要）
-為了讓機器人能正常接收指令並偵測網址，請務必在 Discord Developer Portal 的 **"Bot"** 分頁中啟用以下權限：
+
+為了讓機器人偵測網址與讀取訊息內容，請在 Discord Developer Portal 的 **Bot** 分頁啟用：
+
+- [x] **Message Content Intent**（若未開啟，網址自動轉換等功能無法讀取訊息內容）
+
+Logger 的上線狀態監測是選用功能。只有要啟用它時，才需要另外在 Portal 同時開啟以下兩個 privileged intents，並在 `.env` 設定 `LOGGER_PRESENCE_ENABLED=true`：
+
 - [x] **Presence Intent**
 - [x] **Server Members Intent**
-- [x] **Message Content Intent** (若未開啟，網址自動轉換功能將無法讀取訊息內容)
+
+> `LOGGER_PRESENCE_ENABLED` 預設為 `false`，此時 Bot 不會向 Discord 要求上述兩個 intents，訊息刪除與編輯日誌仍可使用。若只設定環境變數卻未在 Portal 授權兩個 intents，Discord 會以 `4014 (Disallowed intent)` 中斷連線。
 
 ---
 
@@ -56,6 +64,7 @@
 | `BOT_STATUS` | 否 | 機器人狀態 (`online`, `idle`, `dnd`) | `online` |
 | `BOT_ACTIVITY_TYPE` | 否 | 活動類型 (`Playing`, `Watching`, `Listening`) | `Playing` |
 | `BOT_ACTIVITY_NAME` | 否 | 狀態欄顯示文字 | `GPTjsbot | /help` |
+| `LOGGER_PRESENCE_ENABLED` | 否 | 是否向 Discord 要求 Presence 與 Server Members intents；接受 `true`、`1`、`yes`、`on`（不分大小寫） | `false` |
 
 ---
 
@@ -136,14 +145,20 @@ GPTjsbot/
 │   ├── chat.js             # AI 聊天 (/chat，支援自訂模型選單)
 │   ├── reminder.js         # 設定提醒 (/reminder)
 │   ├── quest.js            # Discord 任務查詢 (/quest，列表／搜尋／統計)
+│   ├── logger.js           # 伺服器事件日誌設定 (/logger)
 │   └── ...                 # ping, avatar, info, status, help
 ├── core/                   # 核心調度邏輯
 │   ├── chat.js             # Groq API 封裝與可配置模型邏輯
-│   ├── db.js               # SQLite 資料庫初始化
+│   ├── db.js               # SQLite 資料庫初始化（含 logger_settings 資料表）
 │   ├── deploy-commands.js  # Discord 斜線指令部署腳本
+│   ├── logger.js           # Logger 共用模組（設定讀寫、Embed 建構）
 │   └── scheduler.js        # 定時提醒任務排程器
 ├── events/
-│   └── messageCreate.js    # 監聽訊息（負責網址偵測與轉換）
+│   ├── messageCreate.js    # 監聽訊息（負責網址偵測與轉換）
+│   ├── presenceUpdate.js   # 監聽成員上線狀態變更（Logger）
+│   ├── messageDelete.js    # 監聽訊息刪除事件（Logger）
+│   ├── messageBulkDelete.js # 監聽批次訊息刪除事件（Logger）
+│   └── messageUpdate.js    # 監聽訊息編輯事件（Logger）
 ├── handlers/               # 網址解析與格式修復模組 (Modular Handlers)
 │   ├── facebook.js         # 處理 Facebook 貼文、多圖與小幫手
 │   ├── twitter.js          # 轉換 Twitter / X 連結至 Fixvx
@@ -182,6 +197,44 @@ GPTjsbot/
 *   `/avatar [user]`：取得指定使用者的頭像。
 *   `/info`：取得伺服器或使用者詳細資訊。
 *   `/help`：列出所有可用指令。
+
+### 📋 伺服器事件日誌 (`/logger`)
+
+> ⚠️ **使用前須知**：Logger 的「上線狀態監測」依賴 Discord 的 **Presence Intent** 與 **Server Members Intent**。請先在 Developer Portal → Bot 分頁同時開啟兩者，再設定 `LOGGER_PRESENCE_ENABLED=true` 並重啟 Bot。未設定旗標時只停用 presence 監測，不影響訊息事件日誌。
+
+此功能為**選擇性啟用**，預設關閉。啟用後，機器人會在指定的頻道中即時推送伺服器內的事件訊息（Embed 格式，依事件類型以顏色區分）：
+
+| 事件類型 | 顏色 | 記錄內容 |
+| :--- | :---: | :--- |
+| 🟢 上線狀態變更 | 綠 / 紅 / 黃 | 成員上線、閒置、勿擾、離線切換，附時間戳記與當前活動 |
+| 🗑️ 訊息刪除／批次刪除 | 紅 | 作者、所在頻道與可取得的訊息內容／附件；未快取時內容標示為未知 |
+| ✏️ 訊息編輯 | 黃 | 作者、頻道、訊息連結與修改後內容；只有已快取舊訊息才能顯示可靠的「修改前」內容 |
+
+#### 子指令一覽（需具備「管理伺服器」權限）
+
+*   `/logger enable`：啟用日誌功能（須先設定頻道）。
+*   `/logger disable`：停用日誌功能。
+*   `/logger set-channel <channel>`：指定接收日誌訊息的文字或公告頻道。
+*   `/logger toggle <event>`：開關個別事件類型（`presence` / `delete` / `update`）。
+*   `/logger exclude-channel <channel>`：將指定頻道、討論串或分類加入／移出「不記錄」清單；排除父頻道或分類時也會排除其下的討論串。
+*   `/logger exclude-bots`：切換是否記錄機器人產生的事件（預設排除，避免自我觸發循環）。
+*   `/logger status`：檢視目前設定（含頻道、各事件狀態、排除清單）。
+
+#### 快速啟用流程
+
+1.  若需 presence 日誌，先在 Discord Developer Portal 同時開啟 **Presence Intent**、**Server Members Intent**，在 `.env` 設定 `LOGGER_PRESENCE_ENABLED=true` 後重啟 Bot；不需要此功能可略過。
+2.  在伺服器中建立一個專門用來接收日誌的頻道（建議設為管理員可見）。
+3.  執行 `/logger set-channel` 並選擇該頻道。
+4.  視需求執行 `/logger toggle` 調整要監測的事件類型。
+5.  執行 `/logger enable` 啟用。完成後可隨時用 `/logger status` 檢視設定。
+
+#### 設計考量
+
+*   **避免循環**：預設排除所有機器人事件，避免機器人發送日誌訊息時又被自己記錄。
+*   **長訊息保護**：訊息內容超過 1000 字元會自動截斷並附「…(已截斷)」後綴，避免 Embed 欄位超過 Discord 1024 字元上限。
+*   **partial 訊息處理**：Bot 會 fetch 更新後的訊息，但 Discord API 無法取回已刪除內容，也無法藉由 fetch 還原編輯前版本。因此只有事件發生前已在 Discord.js 快取中的訊息能可靠顯示原文；未快取事件仍會記錄 Message ID、頻道等可取得的 metadata，未知內容會明確標示，不會偽稱完整。
+*   **資料最小化**：Logger 不會為了補足未快取事件而另建無界限的聊天內容快照資料庫。
+*   **每伺服器獨立設定**：設定以伺服器為單位儲存於 SQLite，各伺服器互不影響。
 
 ### 🔗 自動網址轉換對照表 (Embed Fixer)
 當一般使用者發送以下平台網址時，機器人會**自動刪除原先失效或難看的預覽**，並改寫為能完美呈現影音預覽的替代連結：
