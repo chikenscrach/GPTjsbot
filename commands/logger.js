@@ -136,17 +136,20 @@ module.exports = {
               { name: '上線狀態變更 (presence)', value: 'log_presence' },
               { name: '訊息刪除 (delete)', value: 'log_message_delete' },
               { name: '訊息編輯 (update)', value: 'log_message_update' },
+              { name: '成員加入 (member join)', value: 'log_member_join' },
+              { name: '成員離開 (member leave)', value: 'log_member_leave' },
+              { name: '語音頻道移動 (voice)', value: 'log_voice' },
             )
         )
     )
     .addSubcommand(sub =>
       sub
         .setName('exclude-channel')
-        .setDescription('新增或移除「不記錄訊息事件」的頻道')
+        .setDescription('新增或移除「不記錄訊息／語音事件」的頻道或分類')
         .addChannelOption(opt =>
           opt
             .setName('channel')
-            .setDescription('要切換排除設定的頻道')
+            .setDescription('要切換訊息／語音事件排除設定的頻道或分類')
             .setRequired(true)
             .addChannelTypes(
               ChannelType.GuildText,
@@ -244,6 +247,9 @@ module.exports = {
           log_presence: '上線狀態變更',
           log_message_delete: '訊息刪除',
           log_message_update: '訊息編輯',
+          log_member_join: '成員加入',
+          log_member_leave: '成員離開',
+          log_voice: '語音頻道移動',
         };
         if (!Object.hasOwn(eventLabels, eventKey)) {
           return interaction.reply({
@@ -258,6 +264,14 @@ module.exports = {
           && !logger.isPresenceLoggingAvailable()) {
           return interaction.reply({
             content: '❌ 上線狀態日誌目前不可用；部署環境必須先將 `LOGGER_PRESENCE_ENABLED` 設為 `true`，並啟用 Discord Presence 與 Server Members Intents。',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (['log_member_join', 'log_member_leave'].includes(eventKey)
+          && current === 1
+          && !logger.isMemberLoggingAvailable()) {
+          return interaction.reply({
+            content: '❌ 成員加入／離開日誌目前不可用；部署環境必須先將 `LOGGER_MEMBERS_ENABLED` 設為 `true`，並啟用 Discord Server Members Intent。',
             flags: MessageFlags.Ephemeral,
           });
         }
@@ -308,6 +322,7 @@ module.exports = {
         const settings = logger.getSettings(guildId);
         const excludedList = logger.getExcludedChannels(settings);
         const presenceAvailable = logger.isPresenceLoggingAvailable();
+        const memberAvailable = logger.isMemberLoggingAvailable();
         const channelText = settings.channel_id
           ? `<#${settings.channel_id}>`
           : '*(未設定)*';
@@ -327,6 +342,21 @@ module.exports = {
             },
             { name: '訊息刪除', value: settings.log_message_delete ? '✅ 記錄' : '❌ 不記錄', inline: true },
             { name: '訊息編輯', value: settings.log_message_update ? '✅ 記錄' : '❌ 不記錄', inline: true },
+            {
+              name: '成員加入',
+              value: memberAvailable
+                ? (settings.log_member_join ? '✅ 記錄' : '❌ 不記錄')
+                : '⚠️ 不可用（環境未啟用）',
+              inline: true,
+            },
+            {
+              name: '成員離開',
+              value: memberAvailable
+                ? (settings.log_member_leave ? '✅ 記錄' : '❌ 不記錄')
+                : '⚠️ 不可用（環境未啟用）',
+              inline: true,
+            },
+            { name: '語音頻道移動', value: settings.log_voice ? '✅ 記錄' : '❌ 不記錄', inline: true },
             { name: '排除機器人', value: settings.exclude_bots ? '是' : '否', inline: true },
             {
               name: `排除頻道 (${excludedList.length})`,

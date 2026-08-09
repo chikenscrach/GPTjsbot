@@ -2,31 +2,11 @@ require('dotenv').config();
 require('./core/db'); // 順便初始化 DB
 const fs = require('fs');
 const path = require('path');
-const { Client, Collection, Events, GatewayIntentBits, MessageFlags, Partials } = require('discord.js');
+const { Client, Collection, Events, MessageFlags } = require('discord.js');
+const { buildClientOptions } = require('./core/client-options');
 const { startScheduler } = require('./core/scheduler');
 
-const presenceLoggingEnabled = /^(true|1|yes|on)$/i.test(
-  (process.env.LOGGER_PRESENCE_ENABLED || '').trim(),
-);
-
-const intents = [
-  GatewayIntentBits.Guilds,
-  GatewayIntentBits.GuildMessages,
-  GatewayIntentBits.MessageContent,
-];
-const partials = [Partials.Message, Partials.Channel];
-
-// Presence 與成員 Intent 都屬於 privileged intents。只有部署者明確啟用
-// Logger presence 功能時才要求它們，避免 Portal 尚未授權時以 4014 斷線。
-if (presenceLoggingEnabled) {
-  intents.push(GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildMembers);
-  partials.push(Partials.User);
-}
-
-const client = new Client({
-  intents,
-  partials,
-});
+const client = new Client(buildClientOptions());
 
 client.commands = new Collection();
 

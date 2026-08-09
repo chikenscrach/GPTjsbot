@@ -9,6 +9,9 @@ const COLORS = {
   dnd: 0xFEE75C,       // 黃
   delete: 0xED4245,    // 紅
   update: 0xFEE75C,    // 黃
+  memberJoin: 0x57F287,
+  memberLeave: 0xED4245,
+  voice: 0x5865F2,
   info: 0x00ccff,      // 藍
 };
 
@@ -26,6 +29,9 @@ const LOGGER_SETTING_FIELDS = new Set([
   'log_presence',
   'log_message_delete',
   'log_message_update',
+  'log_member_join',
+  'log_member_leave',
+  'log_voice',
   'exclude_channels',
   'exclude_bots',
 ]);
@@ -33,7 +39,7 @@ const LOGGER_SETTING_FIELDS = new Set([
 /**
  * 取得指定伺服器的日誌設定（若不存在則寫入預設值）
  * @param {string} guildId
- * @returns {{guild_id:string, channel_id:string|null, enabled:number, log_presence:number, log_message_delete:number, log_message_update:number, exclude_channels:string, exclude_bots:number}}
+ * @returns {{guild_id:string, channel_id:string|null, enabled:number, log_presence:number, log_message_delete:number, log_message_update:number, log_member_join:number, log_member_leave:number, log_voice:number, exclude_channels:string, exclude_bots:number}}
  */
 function getSettings(guildId) {
   let row = db.prepare('SELECT * FROM logger_settings WHERE guild_id = ?').get(guildId);
@@ -129,50 +135,74 @@ function editableContentFingerprint(message) {
  * 取得排除頻道清單（陣列）
  */
 function getExcludedChannels(settings) {
-  if (!settings.exclude_channels) return [];
+  if (!settings?.exclude_channels) return [];
   return settings.exclude_channels.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 /**
- * 判斷是否應該忽略此事件
+ * 判斷頻道或其父層頻道／分類是否在排除清單內。
+ * @param {object} settings logger_settings 資料列
+ * @param {string|object|null} channelOrId Discord 頻道或頻道 ID
+ * @param {object|null} guild 可選的 Discord Guild，用來解析只有 ID 的頻道
+ * @returns {boolean}
+ */
+function isExcludedChannel(settings, channelOrId, guild = null) {
+  const excludes = new Set(getExcludedChannels(settings));
+  if (excludes.size === 0 || !channelOrId) return false;
+
+  const suppliedChannel = typeof channelOrId === 'object' ? channelOrId : null;
+  const channelId = suppliedChannel?.id || String(channelOrId);
+  if (excludes.has(channelId)) return true;
+
+  const sourceGuild = guild || suppliedChannel?.guild || null;
+  let channel = suppliedChannel
+    || sourceGuild?.channels?.cache?.get(channelId)
+    || sourceGuild?.channels?.resolve?.(channelId)
+    || null;
+  const visited = new Set([channelId]);
+
+  // 兩層足以涵蓋一般頻道 -> category，以及 thread -> forum/text -> category。
+  for (let depth = 0; channel && depth < 2; depth += 1) {
+    const parentId = channel.parentId || channel.parent?.id;
+    if (!parentId || visited.has(parentId)) break;
+    if (excludes.has(parentId)) return true;
+    visited.add(parentId);
+    channel = channel.parent
+      || sourceGuild?.channels?.cache?.get(parentId)
+      || sourceGuild?.channels?.resolve?.(parentId)
+      || null;
+  }
+  return false;
+}
+
+/**
+ * 判斷是否應該忽略此事件。
+ * @param {object} settings logger_settings 資料列
+ * @param {'presence'|'delete'|'update'|'member_join'|'member_leave'|'voice'} event
+ * @param {object|null} message 訊息；非訊息事件可傳 null
+ * @param {object|null} user Discord User，用於排除 bot
+ * @returns {boolean}
  */
 function shouldIgnore(settings, event, message = null, user = null) {
   if (!settings.enabled) return true;
   if (event === 'presence' && !settings.log_presence) return true;
   if (event === 'delete' && !settings.log_message_delete) return true;
   if (event === 'update' && !settings.log_message_update) return true;
+  if (event === 'member_join' && !settings.log_member_join) return true;
+  if (event === 'member_leave' && !settings.log_member_leave) return true;
+  if (event === 'voice' && !settings.log_voice) return true;
 
   if (settings.exclude_bots) {
-    if (user && user.bot) return true;
-    if (message && message.author && message.author.bot) return true;
+    const eventUser = user || message?.author || message?.user || message?.member?.user;
+    if (eventUser?.bot) return true;
   }
 
-  if (message) {
-    const excludes = getExcludedChannels(settings);
-    if (excludes.length > 0) {
-      const channelIds = new Set();
-      const guild = message.guild || message.channel?.guild;
-      let channel = message.channel
-        || guild?.channels?.cache?.get(message.channelId)
-        || null;
-
-      if (message.channelId) channelIds.add(message.channelId);
-      if (channel?.id) channelIds.add(channel.id);
-
-      // 訊息所在頻道之外，也尊重 thread 的父頻道，以及父頻道所屬的
-      // category。一般文字／語音頻道則會直接涵蓋其 category。
-      for (let depth = 0; channel && depth < 2; depth += 1) {
-        if (channel.parentId) channelIds.add(channel.parentId);
-        const parent = channel.parent
-          || guild?.channels?.cache?.get(channel.parentId)
-          || null;
-        if (!parent) break;
-        if (parent.id) channelIds.add(parent.id);
-        channel = parent;
-      }
-
-      if (excludes.some(channelId => channelIds.has(channelId))) return true;
-    }
+  if (message && isExcludedChannel(
+    settings,
+    message.channel || message.channelId,
+    message.guild || message.channel?.guild,
+  )) {
+    return true;
   }
   return false;
 }
@@ -271,6 +301,47 @@ async function sendLog(client, guildId, embed) {
 function isPresenceLoggingAvailable() {
   const value = String(process.env.LOGGER_PRESENCE_ENABLED || '').trim().toLowerCase();
   return ['true', '1', 'yes', 'on'].includes(value);
+}
+
+/**
+ * Guild Members intent 必須由部署者明確選擇啟用。
+ */
+function isMemberLoggingAvailable() {
+  const value = String(process.env.LOGGER_MEMBERS_ENABLED || '').trim().toLowerCase();
+  return ['true', '1', 'yes', 'on'].includes(value);
+}
+
+function getMemberUser(member) {
+  return member?.user || null;
+}
+
+function getMemberId(member) {
+  return getMemberUser(member)?.id || member?.id || null;
+}
+
+function formatMember(member) {
+  const user = getMemberUser(member);
+  const userId = getMemberId(member);
+  if (!userId) return '未知使用者';
+  const userLabel = user?.tag || user?.username || '資料未快取';
+  return `<@${userId}> (${userLabel})`;
+}
+
+function formatKnownTime(value) {
+  if (!value) return '未知';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '未知';
+  return time(date, TimestampStyles.ShortDateTime);
+}
+
+function setUserThumbnail(embed, user) {
+  if (typeof user?.displayAvatarURL !== 'function') return;
+  try {
+    const avatarUrl = user.displayAvatarURL();
+    if (avatarUrl) embed.setThumbnail(avatarUrl);
+  } catch {
+    // Partial user 的頭像資料可能尚未快取；缺少縮圖不應中斷事件日誌。
+  }
 }
 
 // ============== 事件特定 builders ==============
@@ -426,6 +497,104 @@ function buildMessageUpdateEmbed(oldMessage, newMessage) {
   return embed;
 }
 
+/**
+ * 建立成員加入伺服器 Embed。即使 GuildMember 為 partial，也會以可取得的
+ * ID 建立日誌，無法取得的欄位則明確顯示為未知。
+ */
+function buildMemberJoinEmbed(member) {
+  const userId = getMemberId(member);
+  if (!userId) return null;
+  const user = getMemberUser(member);
+  const accountCreatedAt = user?.createdAt || user?.createdTimestamp;
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.memberJoin)
+    .setTitle('📥 成員加入伺服器')
+    .addFields(
+      { name: '👤 成員', value: formatMember(member), inline: false },
+      { name: '📅 帳號建立', value: formatKnownTime(accountCreatedAt), inline: true },
+      { name: '🕐 加入時間', value: formatKnownTime(member?.joinedAt), inline: true },
+    )
+    .setFooter({ text: `User ID: ${userId}` })
+    .setTimestamp();
+
+  setUserThumbnail(embed, user);
+  return embed;
+}
+
+/**
+ * 建立成員離開或遭移除伺服器 Embed。
+ */
+function buildMemberRemoveEmbed(member) {
+  const userId = getMemberId(member);
+  if (!userId) return null;
+  const user = getMemberUser(member);
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.memberLeave)
+    .setTitle('📤 成員離開／遭移除')
+    .addFields(
+      { name: '👤 成員', value: formatMember(member), inline: false },
+      { name: '📅 原加入時間', value: formatKnownTime(member?.joinedAt), inline: true },
+      { name: '🕐 離開／移除時間', value: time(new Date(), TimestampStyles.ShortDateTime), inline: true },
+    )
+    .setFooter({ text: `User ID: ${userId}` })
+    .setTimestamp();
+
+  setUserThumbnail(embed, user);
+  return embed;
+}
+
+/**
+ * 建立語音頻道加入、離開或移動 Embed。靜音等同頻道內狀態變化不屬於
+ * movement，因此 old/new channel 相同時回傳 null。
+ */
+function buildVoiceStateEmbed(oldState, newState) {
+  const oldChannel = oldState?.channel || null;
+  const newChannel = newState?.channel || null;
+  const oldChannelId = oldState?.channelId || oldChannel?.id || null;
+  const newChannelId = newState?.channelId || newChannel?.id || null;
+  if (oldChannelId === newChannelId) return null;
+
+  const member = newState?.member || oldState?.member || null;
+  const userId = getMemberId(member) || newState?.id || oldState?.id || null;
+  const user = getMemberUser(member);
+  const memberLabel = userId
+    ? `<@${userId}> (${user?.tag || user?.username || '資料未快取'})`
+    : '未知使用者';
+  const oldChannelLabel = oldChannelId
+    ? `<#${oldChannelId}> (${oldChannel?.name || '未知'})`
+    : '*(未連線)*';
+  const newChannelLabel = newChannelId
+    ? `<#${newChannelId}> (${newChannel?.name || '未知'})`
+    : '*(未連線)*';
+
+  let title = '🔀 成員移動語音頻道';
+  let color = COLORS.voice;
+  if (!oldChannelId) {
+    title = '🔊 成員加入語音頻道';
+    color = COLORS.memberJoin;
+  } else if (!newChannelId) {
+    title = '🔇 成員離開語音頻道';
+    color = COLORS.memberLeave;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .addFields(
+      { name: '👤 成員', value: memberLabel, inline: false },
+      { name: '🔈 原頻道', value: oldChannelLabel, inline: true },
+      { name: '🔊 新頻道', value: newChannelLabel, inline: true },
+      { name: '🕐 時間', value: time(new Date(), TimestampStyles.ShortDateTime), inline: true },
+    )
+    .setTimestamp();
+
+  if (userId) embed.setFooter({ text: `User ID: ${userId}` });
+  setUserThumbnail(embed, user);
+  return embed;
+}
+
 module.exports = {
   COLORS,
   getSettings,
@@ -433,11 +602,16 @@ module.exports = {
   truncate,
   describeContent,
   getExcludedChannels,
+  isExcludedChannel,
   shouldIgnore,
   sendLogs,
   sendLog,
   isPresenceLoggingAvailable,
+  isMemberLoggingAvailable,
   buildPresenceEmbed,
   buildMessageDeleteEmbed,
   buildMessageUpdateEmbed,
+  buildMemberJoinEmbed,
+  buildMemberRemoveEmbed,
+  buildVoiceStateEmbed,
 };

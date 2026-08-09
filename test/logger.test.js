@@ -2,14 +2,18 @@
 
 const assert = require('node:assert/strict');
 const { after, test } = require('node:test');
+const { spawnSync } = require('node:child_process');
 const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const Database = require('better-sqlite3');
 const {
   ChannelType,
   Collection,
   EmbedBuilder,
   Events,
+  GatewayIntentBits,
+  Partials,
   PermissionFlagsBits,
   PermissionsBitField,
 } = require('discord.js');
@@ -17,13 +21,18 @@ const {
 const testDataDir = mkdtempSync(join(tmpdir(), 'gptjsbot-logger-test-'));
 process.env.BOT_DATA_DIR = testDataDir;
 delete process.env.LOGGER_PRESENCE_ENABLED;
+delete process.env.LOGGER_MEMBERS_ENABLED;
 
 const db = require('../core/db');
+const { buildClientOptions } = require('../core/client-options');
 const logger = require('../core/logger');
 const loggerCommand = require('../commands/logger');
+const guildMemberAdd = require('../events/guildMemberAdd');
+const guildMemberRemove = require('../events/guildMemberRemove');
 const messageBulkDelete = require('../events/messageBulkDelete');
 const messageUpdate = require('../events/messageUpdate');
 const presenceUpdate = require('../events/presenceUpdate');
+const voiceStateUpdate = require('../events/voiceStateUpdate');
 
 after(() => {
   db.close();
@@ -36,6 +45,9 @@ function enabledSettings(overrides = {}) {
     log_presence: 1,
     log_message_delete: 1,
     log_message_update: 1,
+    log_member_join: 1,
+    log_member_leave: 1,
+    log_voice: 1,
     exclude_channels: '',
     exclude_bots: 1,
     ...overrides,
@@ -124,6 +136,71 @@ function embedCharacterCount(embed) {
       (total, field) => total + field.name.length + field.value.length,
       0,
     );
+}
+
+function assertEmbedWithinLimits(embed) {
+  const data = typeof embed.toJSON === 'function' ? embed.toJSON() : embed;
+  assert.ok(embedCharacterCount(data) <= 6000);
+  assert.ok((data.fields || []).length <= 25);
+  assert.ok((data.fields || []).every(field => field.name.length <= 256));
+  assert.ok((data.fields || []).every(field => field.value.length <= 1024));
+}
+
+function makeVoiceFixture({ bot = false } = {}) {
+  const guild = {
+    id: 'voice-guild',
+    client: { id: 'voice-client' },
+    channels: { cache: new Collection() },
+  };
+  const oldCategory = { id: 'old-category', name: 'Old category', guild, parentId: null };
+  const newCategory = { id: 'new-category', name: 'New category', guild, parentId: null };
+  const oldChannel = {
+    id: 'old-voice',
+    name: 'Old voice',
+    guild,
+    parent: oldCategory,
+    parentId: oldCategory.id,
+    toString: () => '<#old-voice>',
+  };
+  const newChannel = {
+    id: 'new-voice',
+    name: 'New voice',
+    guild,
+    parent: newCategory,
+    parentId: newCategory.id,
+    toString: () => '<#new-voice>',
+  };
+  for (const channel of [oldCategory, newCategory, oldChannel, newChannel]) {
+    guild.channels.cache.set(channel.id, channel);
+  }
+
+  const user = {
+    id: 'voice-user',
+    username: 'voice-user',
+    tag: 'voice-user',
+    bot,
+    displayAvatarURL: () => 'https://example.test/voice-avatar.png',
+  };
+  const member = { id: user.id, user, guild, displayName: 'Voice User' };
+  const makeState = channel => ({
+    guild,
+    client: guild.client,
+    member,
+    channel,
+    channelId: channel?.id ?? null,
+  });
+
+  return {
+    guild,
+    member,
+    oldCategory,
+    newCategory,
+    oldChannel,
+    newChannel,
+    disconnected: makeState(null),
+    oldState: makeState(oldChannel),
+    newState: makeState(newChannel),
+  };
 }
 
 test('truncate keeps the suffix inside the requested maximum', () => {
@@ -241,6 +318,126 @@ test('presence builder accepts a partial user without a cached GuildMember', () 
   assert.match(embed.toJSON().fields[0].value, /partial-user/);
 });
 
+test('member builders safely describe partial members', () => {
+  const partialMember = {
+    id: 'partial-member',
+    partial: true,
+    guild: { id: 'partial-member-guild', memberCount: 7 },
+    user: {
+      id: 'partial-member',
+      partial: true,
+      username: 'partial-member',
+      bot: false,
+    },
+  };
+
+  const joined = logger.buildMemberJoinEmbed(partialMember);
+  const removed = logger.buildMemberRemoveEmbed(partialMember);
+  assert.ok(joined);
+  assert.ok(removed);
+  assert.match(JSON.stringify(joined.toJSON()), /partial-member/);
+  assert.match(JSON.stringify(removed.toJSON()), /partial-member/);
+  assertEmbedWithinLimits(joined);
+  assertEmbedWithinLimits(removed);
+});
+
+test('voice builder describes joining, leaving, and moving channels', () => {
+  const fixture = makeVoiceFixture();
+  const joined = logger.buildVoiceStateEmbed(fixture.disconnected, fixture.newState);
+  const left = logger.buildVoiceStateEmbed(fixture.oldState, fixture.disconnected);
+  const moved = logger.buildVoiceStateEmbed(fixture.oldState, fixture.newState);
+
+  assert.ok(joined);
+  assert.ok(left);
+  assert.ok(moved);
+  assert.match(JSON.stringify(joined.toJSON()), /new-voice/);
+  assert.match(JSON.stringify(left.toJSON()), /old-voice/);
+  assert.match(JSON.stringify(moved.toJSON()), /old-voice/);
+  assert.match(JSON.stringify(moved.toJSON()), /new-voice/);
+  for (const embed of [joined, left, moved]) assertEmbedWithinLimits(embed);
+});
+
+test('logger settings add disabled member and voice defaults', () => {
+  const settings = logger.getSettings('new-event-defaults-guild');
+  assert.equal(settings.log_member_join, 0);
+  assert.equal(settings.log_member_leave, 0);
+  assert.equal(settings.log_voice, 0);
+});
+
+test('client options request only the intents enabled by deployment flags', () => {
+  const defaults = buildClientOptions({});
+  assert.ok(defaults.intents.includes(GatewayIntentBits.GuildVoiceStates));
+  assert.ok(!defaults.intents.includes(GatewayIntentBits.GuildMembers));
+  assert.ok(!defaults.intents.includes(GatewayIntentBits.GuildPresences));
+  assert.ok(defaults.partials.includes(Partials.Message));
+  assert.ok(!defaults.partials.includes(Partials.GuildMember));
+
+  const members = buildClientOptions({ LOGGER_MEMBERS_ENABLED: 'yes' });
+  assert.ok(members.intents.includes(GatewayIntentBits.GuildMembers));
+  assert.ok(!members.intents.includes(GatewayIntentBits.GuildPresences));
+  assert.ok(members.partials.includes(Partials.User));
+  assert.ok(members.partials.includes(Partials.GuildMember));
+
+  const presence = buildClientOptions({ LOGGER_PRESENCE_ENABLED: 'ON' });
+  assert.ok(presence.intents.includes(GatewayIntentBits.GuildMembers));
+  assert.ok(presence.intents.includes(GatewayIntentBits.GuildPresences));
+  assert.ok(presence.partials.includes(Partials.User));
+  assert.ok(presence.partials.includes(Partials.GuildMember));
+});
+
+test('legacy logger schema migration is repeatable', () => {
+  const legacyDir = mkdtempSync(join(tmpdir(), 'gptjsbot-logger-legacy-'));
+  try {
+    const legacyDb = new Database(join(legacyDir, 'bot.db'));
+    legacyDb.exec(`
+      CREATE TABLE logger_settings (
+        guild_id TEXT PRIMARY KEY,
+        channel_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        log_presence INTEGER NOT NULL DEFAULT 1,
+        log_message_delete INTEGER NOT NULL DEFAULT 1,
+        log_message_update INTEGER NOT NULL DEFAULT 1,
+        exclude_channels TEXT NOT NULL DEFAULT '',
+        exclude_bots INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO logger_settings (
+        guild_id, channel_id, enabled, log_presence, exclude_channels, updated_at
+      ) VALUES (
+        'legacy-guild', 'legacy-channel', 1, 0, 'legacy-excluded', 123
+      );
+    `);
+    legacyDb.close();
+
+    const migrationCheck = [
+      "const db = require('./core/db');",
+      "const names = db.pragma('table_info(logger_settings)').map(column => column.name);",
+      "for (const name of ['log_member_join', 'log_member_leave', 'log_voice']) {",
+      "  if (!names.includes(name)) throw new Error(`missing ${name}`);",
+      '}',
+      "const row = db.prepare('SELECT * FROM logger_settings WHERE guild_id = ?').get('legacy-guild');",
+      "if (!row || row.channel_id !== 'legacy-channel' || row.enabled !== 1",
+      "  || row.log_presence !== 0 || row.exclude_channels !== 'legacy-excluded'",
+      "  || row.updated_at !== 123) throw new Error('legacy data changed');",
+      "for (const name of ['log_member_join', 'log_member_leave', 'log_voice']) {",
+      "  if (row[name] !== 0) throw new Error(`unexpected default for ${name}`);",
+      '}',
+      'db.close();',
+    ].join('\n');
+
+    for (let run = 0; run < 2; run += 1) {
+      const result = spawnSync(process.execPath, ['-e', migrationCheck], {
+        cwd: join(__dirname, '..'),
+        env: { ...process.env, BOT_DATA_DIR: legacyDir },
+        encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+  } finally {
+    rmSync(legacyDir, { recursive: true, force: true });
+  }
+});
+
 test('updateSetting rejects unknown SQL identifiers', () => {
   assert.throws(
     () => logger.updateSetting('invalid-setting-guild', { 'enabled = 1': 1 }),
@@ -342,6 +539,9 @@ test('status remains within Embed limits with 500 excluded channels', async () =
   const embed = replies[0].embeds[0].toJSON();
   assert.ok(embed.fields.length <= 25);
   assert.ok(embed.fields.every(field => field.value.length <= 1024));
+  assert.ok(embed.fields.some(field => field.name === '成員加入'));
+  assert.ok(embed.fields.some(field => field.name === '成員離開'));
+  assert.ok(embed.fields.some(field => field.name === '語音頻道移動'));
   assert.match(embed.fields.at(-1).name, /500/);
   assert.ok(embedCharacterCount(embed) <= 6000);
 });
@@ -367,6 +567,160 @@ test('presence can be disabled while unavailable but cannot be enabled', async (
   await loggerCommand.execute(enable.interaction);
   assert.match(enable.replies[0].content, /目前不可用/);
   assert.equal(logger.getSettings(guildId).log_presence, 0);
+});
+
+test('member toggles require the opt-in env guard while voice remains available', async () => {
+  const previousValue = process.env.LOGGER_MEMBERS_ENABLED;
+  const guildId = 'member-toggle-guild';
+  logger.updateSetting(guildId, {
+    log_member_join: 0,
+    log_member_leave: 0,
+    log_voice: 0,
+  });
+
+  try {
+    delete process.env.LOGGER_MEMBERS_ENABLED;
+    const unavailable = makeInteraction({
+      guildId,
+      subcommand: 'toggle',
+      eventKey: 'log_member_join',
+    });
+    await loggerCommand.execute(unavailable.interaction);
+    assert.match(unavailable.replies[0].content, /目前不可用|LOGGER_MEMBERS_ENABLED/);
+    assert.equal(logger.getSettings(guildId).log_member_join, 0);
+
+    process.env.LOGGER_MEMBERS_ENABLED = 'yes';
+    for (const eventKey of ['log_member_join', 'log_member_leave']) {
+      const toggle = makeInteraction({ guildId, subcommand: 'toggle', eventKey });
+      await loggerCommand.execute(toggle.interaction);
+      assert.equal(logger.getSettings(guildId)[eventKey], 1);
+    }
+
+    delete process.env.LOGGER_MEMBERS_ENABLED;
+    const voiceToggle = makeInteraction({
+      guildId,
+      subcommand: 'toggle',
+      eventKey: 'log_voice',
+    });
+    await loggerCommand.execute(voiceToggle.interaction);
+    assert.equal(logger.getSettings(guildId).log_voice, 1);
+  } finally {
+    if (previousValue === undefined) delete process.env.LOGGER_MEMBERS_ENABLED;
+    else process.env.LOGGER_MEMBERS_ENABLED = previousValue;
+  }
+});
+
+test('member handlers honor availability, event toggles, partials, and bot exclusion', async () => {
+  assert.equal(guildMemberAdd.name, Events.GuildMemberAdd);
+  assert.equal(guildMemberRemove.name, Events.GuildMemberRemove);
+
+  const previousValue = process.env.LOGGER_MEMBERS_ENABLED;
+  const guild = { id: 'member-handler-guild', memberCount: 9, client: {} };
+  const partialMember = {
+    id: 'partial-handler-member',
+    partial: true,
+    guild,
+    client: guild.client,
+    user: {
+      id: 'partial-handler-member',
+      partial: true,
+      username: 'partial-handler-member',
+      bot: false,
+    },
+  };
+  const sent = [];
+
+  try {
+    delete process.env.LOGGER_MEMBERS_ENABLED;
+    await withPatchedLogger({
+      getSettings: () => {
+        throw new Error('member settings must not be read while unavailable');
+      },
+      sendLog: async () => sent.push('unexpected'),
+    }, async () => guildMemberAdd.execute(partialMember));
+    assert.equal(sent.length, 0);
+
+    process.env.LOGGER_MEMBERS_ENABLED = 'true';
+    let settings = enabledSettings();
+    await withPatchedLogger({
+      getSettings: () => settings,
+      sendLog: async (_client, guildId, embed) => sent.push({ guildId, embed }),
+    }, async () => {
+      await guildMemberAdd.execute(partialMember);
+      await guildMemberRemove.execute(partialMember);
+
+      settings = enabledSettings({ log_member_join: 0 });
+      await guildMemberAdd.execute(partialMember);
+
+      settings = enabledSettings({ exclude_bots: 1 });
+      await guildMemberRemove.execute({
+        ...partialMember,
+        user: { ...partialMember.user, bot: true },
+      });
+    });
+
+    assert.equal(sent.length, 2);
+    assert.ok(sent.every(entry => entry.guildId === guild.id));
+    assert.ok(sent.every(entry => entry.embed));
+  } finally {
+    if (previousValue === undefined) delete process.env.LOGGER_MEMBERS_ENABLED;
+    else process.env.LOGGER_MEMBERS_ENABLED = previousValue;
+  }
+});
+
+test('voice handler respects its toggle and logs only channel movement', async () => {
+  assert.equal(voiceStateUpdate.name, Events.VoiceStateUpdate);
+  const fixture = makeVoiceFixture();
+  const sent = [];
+  let settings = enabledSettings();
+
+  await withPatchedLogger({
+    getSettings: () => settings,
+    sendLog: async (_client, guildId, embed) => sent.push({ guildId, embed }),
+  }, async () => {
+    await voiceStateUpdate.execute(fixture.disconnected, fixture.newState);
+    await voiceStateUpdate.execute(fixture.oldState, fixture.disconnected);
+    await voiceStateUpdate.execute(fixture.oldState, fixture.newState);
+
+    await voiceStateUpdate.execute(
+      { ...fixture.oldState, serverMute: false },
+      { ...fixture.oldState, serverMute: true },
+    );
+
+    settings = enabledSettings({ log_voice: 0 });
+    await voiceStateUpdate.execute(fixture.disconnected, fixture.newState);
+  });
+
+  assert.equal(sent.length, 3);
+  assert.ok(sent.every(entry => entry.guildId === fixture.guild.id));
+  assert.ok(sent.every(entry => entry.embed));
+});
+
+test('voice handler suppresses excluded source/destination channels, categories, and bots', async () => {
+  const fixture = makeVoiceFixture();
+  let settings = enabledSettings();
+  let sent = 0;
+
+  await withPatchedLogger({
+    getSettings: () => settings,
+    sendLog: async () => { sent += 1; },
+  }, async () => {
+    for (const excludedId of [
+      fixture.oldChannel.id,
+      fixture.newChannel.id,
+      fixture.oldCategory.id,
+      fixture.newCategory.id,
+    ]) {
+      settings = enabledSettings({ exclude_channels: excludedId });
+      await voiceStateUpdate.execute(fixture.oldState, fixture.newState);
+    }
+
+    settings = enabledSettings({ exclude_channels: '', exclude_bots: 1 });
+    const botFixture = makeVoiceFixture({ bot: true });
+    await voiceStateUpdate.execute(botFixture.disconnected, botFixture.newState);
+  });
+
+  assert.equal(sent, 0);
 });
 
 test('messageUpdate fetches only the new partial before filtering and logging', async () => {
