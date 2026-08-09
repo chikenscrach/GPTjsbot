@@ -510,6 +510,7 @@ module.exports = {
         // share 短網址要等 302 重導向後才知道 username / postCode
         let usernameFromUrl = m ? m[1] : null;
         let postCode = m ? m[2] : null;
+        let resolvedSharePost = false;
         const fetchUrl = m
             ? `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`
             : `https://www.threads.com/share/${shareM[1]}/`;
@@ -538,7 +539,11 @@ module.exports = {
                 resp = null; // 超過 MAX_REDIRECTS 時視為失敗
                 finalUrl = new URL(loc, finalUrl).href;
                 const hopM = new URL(finalUrl).pathname.match(THREADS_POST_RE);
-                if (hopM) { usernameFromUrl = hopM[1]; postCode = hopM[2]; }
+                if (hopM) {
+                    usernameFromUrl = hopM[1];
+                    postCode = hopM[2];
+                    if (shareM) resolvedSharePost = true;
+                }
             }
             if (!resp) return null;
             // 被重導向到 ?error=invalid_post：需登入或貼文已刪除，離開 try 後再處理
@@ -565,17 +570,18 @@ module.exports = {
                 return { type: 'notice', message: '網址錯誤或脆文已刪除' };
             }
             const access = await checkProfileAccess(usernameFromUrl);
-            // 個人頁公開但貼文打不開 → 貼文本身已刪除或網址錯誤
-            if (access === 'public') {
+            // direct canonical 的公開作者仍視為已刪除；但 share 已成功解出貼文網址時，
+            // invalid_post 也可能是單篇限定內容，不能只因個人頁公開就判定已刪除。
+            if (access === 'public' && !resolvedSharePost) {
                 return { type: 'notice', message: '網址錯誤或脆文已刪除' };
             }
             const noticeRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setStyle(ButtonStyle.Link)
                     .setLabel('開啟原文')
-                    .setURL(`https://www.threads.com/@${usernameFromUrl}/post/${postCode}`)
+                    .setURL(`https://threads.com/@${usernameFromUrl}/post/${postCode}`)
             );
-            const message = access === 'login'
+            const message = access === 'login' || resolvedSharePost
                 ? '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）'
                 : '🔒 無法檢視此貼文：可能需要登入 Threads，或貼文已刪除';
             return { type: 'notice', message, components: [noticeRow.toJSON()] };
