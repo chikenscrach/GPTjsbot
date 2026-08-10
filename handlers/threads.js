@@ -71,17 +71,35 @@ function htmlDecode(s) {
         .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#039;|&#x27;/g, "'");
 }
 
-function jstr(s) {
-    if (s == null) return '';
-    try { return JSON.parse('"' + s + '"'); } catch { return String(s); }
-}
-
 function pickMeta(html, prop) {
     const esc = prop.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
     const m = html.match(new RegExp(
         `<meta\\s+[^>]*?(?:property|name)=["']${esc}["'][^>]*?content=["']([^"']+)["']`, 'i'
     ));
     return m ? htmlDecode(m[1]) : null;
+}
+
+function pickCanonical(html) {
+    const tags = html.match(/<link\b[^>]*>/gi) || [];
+    for (const tag of tags) {
+        const rel = tag.match(/\brel=["']([^"']+)["']/i);
+        if (!rel || !rel[1].split(/\s+/).some(v => v.toLowerCase() === 'canonical')) continue;
+        const href = tag.match(/\bhref=["']([^"']+)["']/i);
+        if (href) return htmlDecode(href[1]);
+    }
+    return null;
+}
+
+function threadsPostIdentity(value) {
+    if (!value) return null;
+    try {
+        const parsed = new URL(htmlDecode(value), 'https://www.threads.com/');
+        if (!/^www\.threads\.(?:com|net)$|^threads\.(?:com|net)$/i.test(parsed.hostname)) return null;
+        const match = parsed.pathname.match(THREADS_POST_RE);
+        return match ? { username: match[1].toLowerCase(), code: match[2] } : null;
+    } catch {
+        return null;
+    }
 }
 
 function extractSjsChunks(html) {
@@ -113,27 +131,6 @@ function balancedBlock(text, startIdx, openC, closeC) {
         i++;
     }
     return null;
-}
-
-function splitObjects(s) {
-    const out = [];
-    let depth = 0, start = -1, inStr = false, esc = false;
-    for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
-        if (inStr) {
-            if (esc) esc = false;
-            else if (ch === '\\') esc = true;
-            else if (ch === '"') inStr = false;
-        } else {
-            if (ch === '"') inStr = true;
-            else if (ch === '{') { if (depth === 0) start = i; depth++; }
-            else if (ch === '}') {
-                depth--;
-                if (depth === 0 && start >= 0) { out.push(s.slice(start, i+1)); start = -1; }
-            }
-        }
-    }
-    return out;
 }
 
 // 從一個 post/carousel item 物件取媒體（物件必須是已 parse 好的 JS 物件）
@@ -186,32 +183,77 @@ function extractMedia(obj) {
     return items;
 }
 
-function findPostObject(chunks, shortcode) {
-    const codeNeedle = `"code":"${shortcode}"`;
-    const hasMediaMarkers = c => c.includes('image_versions2')
-        || c.includes('carousel_media')
-        || c.includes('video_versions');
-    const mediaScore = c => (c.match(/video_versions/g) || []).length
-        + (c.match(/carousel_media/g) || []).length
-        + (c.match(/image_versions2/g) || []).length;
+function selectRichestMedia(objects) {
+    let best = [];
+    let bestRank = [-1, -1, -1];
+
+    for (const obj of objects) {
+        const media = extractMedia(obj);
+        const videoCount = media.filter(item => item.video).length;
+        const coveredCount = media.filter(item => item.image).length;
+        // A video representation is richer than its image-only cover. For equal media
+        // types, prefer the duplicate carrying more carousel/standalone items and covers.
+        const rank = [videoCount, media.length, coveredCount];
+        const richer = rank[0] > bestRank[0]
+            || (rank[0] === bestRank[0] && rank[1] > bestRank[1])
+            || (rank[0] === bestRank[0] && rank[1] === bestRank[1] && rank[2] > bestRank[2]);
+        if (richer) {
+            best = media;
+            bestRank = rank;
+        }
+    }
+
+    return best;
+}
+
+function findPostObject(chunks, shortcode, expectedUsername) {
+    const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
     const objScore = o => {
         if (!o || typeof o !== 'object') return 0;
-        let score = 0;
+        let score = Object.keys(o).length;
         const media = extractMedia(o);
         if (media.length) score += 100 + media.length;
         if (o.caption && typeof o.caption.text === 'string') score += 50;
+        if (extractPoll(o)) score += 40;
+        const shareInfo = o.text_post_app_info && o.text_post_app_info.share_info;
+        if (shareInfo && (shareInfo.quoted_attachment_post || shareInfo.quoted_post)) score += 40;
         const u = o.user || o.owner;
         if (u && typeof u.profile_pic_url === 'string') score += 10;
-        if (o.code === shortcode) score += 5;
         return score;
     };
+
+    const candidates = [];
+
+    function collectExactObjects(root) {
+        const stack = [root];
+        const visited = new Set();
+
+        while (stack.length) {
+            const value = stack.pop();
+            if (!value || typeof value !== 'object' || visited.has(value)) continue;
+            visited.add(value);
+
+            // A wrapper containing the target code is not the target post. Only a node
+            // whose own `code` field matches may contribute caption, media, quote or poll data.
+            if (!Array.isArray(value) && hasOwn(value, 'code') && value.code === shortcode) {
+                candidates.push(value);
+            }
+
+            if (Array.isArray(value)) {
+                for (let i = value.length - 1; i >= 0; i--) stack.push(value[i]);
+            } else {
+                for (const child of Object.values(value)) stack.push(child);
+            }
+        }
+    }
 
     function blocksAroundCode(target) {
         const out = [];
         const seenStarts = new Set();
-        let from = 0, at;
-        while ((at = target.indexOf(codeNeedle, from)) !== -1) {
-            from = at + codeNeedle.length;
+        const codePattern = new RegExp(`"code"\\s*:\\s*"${shortcode}"`, 'g');
+        let match;
+        while ((match = codePattern.exec(target)) !== null) {
+            const at = match.index;
             let tried = 0;
             for (let i = at; i >= 0 && tried < 160; i--) {
                 if (target[i] !== '{') continue;
@@ -220,7 +262,6 @@ function findPostObject(chunks, shortcode) {
                 const blk = balancedBlock(target, i, '{', '}');
                 if (!blk) continue;
                 const text = target.slice(blk[0], blk[1]);
-                if (!text.includes(codeNeedle)) continue;
                 seenStarts.add(i);
                 out.push({ start: i, text });
             }
@@ -229,104 +270,61 @@ function findPostObject(chunks, shortcode) {
         return out.sort((a, b) => a.text.length - b.text.length || a.start - b.start);
     }
 
-    function regexExtractMedia(target) {
-        const media = [];
+    for (const chunk of chunks) {
+        if (typeof chunk !== 'string' || !chunk.includes(shortcode)) continue;
 
-        // carousel_media
-        const carRe = /"carousel_media":\[/g;
-        let cm;
-        while ((cm = carRe.exec(target)) !== null) {
-            const p = cm.index + cm[0].length - 1; // 指在 '['
-            const blk = balancedBlock(target, p, '[', ']');
-            if (!blk) continue;
-            const inner = target.slice(blk[0]+1, blk[1]-1);
-            for (const os of splitObjects(inner)) {
-                let o; try { o = JSON.parse(os); } catch { continue; }
-                const e = extractMediaFromObj(o); if (e) media.push(e);
-            }
-        }
-        // 頂層 video_versions（小心別重複抓 carousel 內的）
-        const vidRe = /"video_versions":\[/g;
-        let vm;
-        while ((vm = vidRe.exec(target)) !== null) {
-            const before = target.slice(Math.max(0, vm.index - 40), vm.index);
-            if (before.includes('carousel_media')) continue; // 已在上面處理
-            const blk = balancedBlock(target, vm.index + vm[0].length - 1, '[', ']');
-            if (!blk) continue;
-            const arr = target.slice(blk[0]+1, blk[1]-1);
-            const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.mp4[^"]*)"/);
-            if (u) {
-                const url = jstr(u[1]);
-                if (!media.some(x => x.video === url)) media.unshift({ video: url });
-            }
-        }
-        // 頂層 image_versions2（僅當前沒有任何媒體時補一個）
-        if (media.length === 0) {
-            const imgRe = /"image_versions2":\{"candidates":\[/;
-            const im = imgRe.exec(target);
-            if (im) {
-                const blk = balancedBlock(target, im.index + im[0].length - 1, '[', ']');
-                if (blk) {
-                    const arr = target.slice(blk[0]+1, blk[1]-1);
-                    const u = arr.match(/"url":"((?:https?:)?\\\/\\\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/);
-                    if (u) media.push({ image: jstr(u[1]) });
-                }
-            }
+        try {
+            // The canonical post is not necessarily the first thread item and can itself
+            // be a quoted or inline node nested below another post, so walk the full graph.
+            collectExactObjects(JSON.parse(chunk));
+            continue;
+        } catch {
+            // A malformed wrapper can still contain a standalone valid post object. This
+            // fallback parses balanced objects, but the same own-code check is still applied.
         }
 
-        return media;
-    }
-
-    // 1) 同一個 shortcode 可能出現在多個 data-sjs chunk（SEO / route / analytics / full post）。
-    //    不可直接取第一個；要掃過所有含 shortcode 的 chunk，並優先檢查媒體特徵較完整者。
-    const exactChunks = chunks.filter(ch => ch.includes(codeNeedle));
-    const exactTargets = exactChunks
-        .map((ch, order) => ({ ch, order, score: mediaScore(ch) }))
-        .sort((a, b) => b.score - a.score || a.order - b.order)
-        .map(x => x.ch);
-
-    let bestMatchedObj = null;
-    let bestScore = -1;
-
-    for (const target of exactTargets) {
-        // 由小到大逐塊 parse，命中媒體立即返回，避免先把大型祖先 wrapper 全部 parse 完
-        for (const block of blocksAroundCode(target)) {
-            let obj;
-            try { obj = JSON.parse(block.text); }
-            catch { continue; /* malformed / non-standalone JSON object */ }
-            const score = objScore(obj);
-            if (score > bestScore) { bestScore = score; bestMatchedObj = obj; }
-            const media = extractMedia(obj);
-            if (media.length > 0) return { obj, media };
+        for (const block of blocksAroundCode(chunk)) {
+            try { collectExactObjects(JSON.parse(block.text)); }
+            catch { /* not a standalone JSON object */ }
         }
     }
 
-    // 如果已經成功 parse 到目標貼文物件，但 extractMedia 沒抽出媒體，
-    // 就視為純文字 / 投票 / 不支援的 attachment；不要再掃 wrapper，避免抓到留言媒體。
-    if (bestMatchedObj && bestMatchedObj.code === shortcode) return { obj: bestMatchedObj, media: [] };
+    // Textual proximity, an ancestor containing the code, and a media-heavy chunk are not
+    // proof of ownership. If no exact node can be parsed, resolve() safely falls back to OG.
+    if (!candidates.length) return null;
 
-    // 2) 如果 JSON.parse 沒抓到完整 post object，但含 shortcode 的 chunk 有媒體標記，
-    //    才在「含 shortcode 的 chunks」內做 regex fallback；避免掃到頁面其他無關媒體。
-    for (const target of exactTargets) {
-        if (!hasMediaMarkers(target)) continue;
-        const blocks = blocksAroundCode(target);
-        const postLikeBlocks = blocks.filter(b =>
-            b.text.includes('"caption"') || b.text.includes('"text_post_app_info"') || b.text.includes('"media_type"')
-        );
-        for (const block of (postLikeBlocks.length ? postLikeBlocks : blocks)) {
-            const media = regexExtractMedia(block.text);
-            if (media.length > 0) return { obj: bestMatchedObj, media };
+    const identities = {
+        id: new Set(),
+        pk: new Set(),
+        username: new Set(),
+    };
+    for (const obj of candidates) {
+        if (obj.id != null && String(obj.id)) identities.id.add(String(obj.id));
+        if (obj.pk != null && String(obj.pk)) identities.pk.add(String(obj.pk));
+        const user = obj.user || obj.owner;
+        if (user && typeof user.username === 'string' && user.username) {
+            identities.username.add(user.username.toLowerCase());
         }
     }
 
-    // 3) 只要頁面內有 shortcode，就不要退回掃全頁其他媒體。
-    //    這通常代表純文字貼文，或 Threads JSON 結構變動導致無法解析媒體。
-    if (exactChunks.length > 0) return { obj: bestMatchedObj, media: [] };
+    const expected = String(expectedUsername || '').toLowerCase();
+    const conflictingIdentity = identities.id.size > 1
+        || identities.pk.size > 1
+        || identities.username.size > 1;
+    const wrongAuthor = expected && identities.username.size === 1
+        && !identities.username.has(expected);
+    if (conflictingIdentity || wrongAuthor) {
+        return { obj: null, objects: [], media: [], ambiguous: true };
+    }
 
-    // 4) 極端 fallback：完全找不到 shortcode 時，維持舊行為，挑媒體特徵最多的 chunk 掃描。
-    const fallbackTarget = chunks.reduce((a, b) => mediaScore(b) > mediaScore(a || '') ? b : a, null);
-    if (!fallbackTarget) return null;
-    return { obj: null, media: regexExtractMedia(fallbackTarget) };
+    candidates.sort((a, b) => objScore(b) - objScore(a));
+    const obj = candidates[0];
+    return {
+        obj,
+        objects: candidates,
+        media: selectRichestMedia(candidates),
+        ambiguous: false,
+    };
 }
 
 // 區分「私人帳號需登入」與「貼文已刪除」：
@@ -416,16 +414,13 @@ function extFromUrl(url, kind) {
     return m ? '.' + m[1].toLowerCase() : '.jpg';
 }
 
-// 找貼文作者的頭像網址：優先從已解析的貼文物件，再退回從 HTML 掃描該使用者的 profile_pic_url
-function findProfilePic(obj, html, username) {
-    if (obj) {
-        const u = obj.user || obj.owner;
-        if (u && typeof u.profile_pic_url === 'string' && u.profile_pic_url) return u.profile_pic_url;
-    }
-    const esc = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let m = html.match(new RegExp(`"username":"${esc}"[^{}]*?"profile_pic_url":"((?:[^"\\\\]|\\\\.)+)"`));
-    if (!m) m = html.match(new RegExp(`"profile_pic_url":"((?:[^"\\\\]|\\\\.)+)"[^{}]*?"username":"${esc}"`));
-    return m ? jstr(m[1]) : null;
+// 頭像也只信任已通過 exact-code 驗證的貼文物件；不可從整頁挑同名推薦資料。
+function findProfilePic(obj) {
+    if (!obj) return null;
+    const u = obj.user || obj.owner;
+    return u && typeof u.profile_pic_url === 'string' && u.profile_pic_url
+        ? u.profile_pic_url
+        : null;
 }
 
 function extractPoll(obj) {
@@ -588,9 +583,32 @@ module.exports = {
         }
         const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
 
-        const ogTitle = pickMeta(html, 'og:title') || '';
-        const ogDesc  = pickMeta(html, 'og:description') || '';
-        const ogImage = pickMeta(html, 'og:image') || null;
+        const rawOgTitle = pickMeta(html, 'og:title') || '';
+        const rawOgDesc  = pickMeta(html, 'og:description') || '';
+        const rawOgImage = pickMeta(html, 'og:image') || null;
+        const metadataUrls = [pickMeta(html, 'og:url'), pickCanonical(html)].filter(Boolean);
+
+        const chunks = extractSjsChunks(html);
+        const found = findPostObject(chunks, postCode, usernameFromUrl);
+        const postObjects = (found && found.objects) || [];
+
+        const expectedUsername = usernameFromUrl.toLowerCase();
+        const titleAuthor = rawOgTitle.match(/[@＠]([A-Za-z0-9._]+)/);
+        const titleAuthorMatches = !titleAuthor || titleAuthor[1].toLowerCase() === expectedUsername;
+        const metadataUrlsMatch = metadataUrls.every(value => {
+            const identity = threadsPostIdentity(value);
+            return identity && identity.code === postCode && identity.username === expectedUsername;
+        });
+        // OG data is only safe when at least one page-level identity URL binds it to this
+        // redirect target. A matching author name alone cannot distinguish two posts by the
+        // same account, so metadata without og:url/canonical must fail closed.
+        const ogTrusted = !(found && found.ambiguous)
+            && titleAuthorMatches
+            && metadataUrls.length > 0
+            && metadataUrlsMatch;
+        const ogTitle = ogTrusted ? rawOgTitle : '';
+        const ogDesc  = ogTrusted ? rawOgDesc : '';
+        const ogImage = ogTrusted ? rawOgImage : null;
 
         // 作者 / 顯示名
         let username = usernameFromUrl;
@@ -604,28 +622,70 @@ module.exports = {
         const displayName = dn || `@${username}`;
 
         // 媒體（純文字貼文不把 og:image 當成貼文圖片——那只是自動產生的預覽卡，不是內容）
-        const chunks = extractSjsChunks(html);
-        const found = findPostObject(chunks, postCode);
         let media = (found && found.media) || [];
 
         // 引用轉發（quote post）：外層貼文自己的媒體欄位是 null，引用內容掛在
         // share_info.quoted_attachment_post（quoted_post 實測一律是 null，仍留作備援）。
         // 引用的媒體併入媒體清單、文字之後以獨立 field 呈現。
-        const shareInfo = found && found.obj && found.obj.text_post_app_info
-            && found.obj.text_post_app_info.share_info;
-        const quotedObj = shareInfo
-            && (shareInfo.quoted_attachment_post || shareInfo.quoted_post);
+        const quoteCandidates = [];
+        for (const obj of postObjects) {
+            const info = obj.text_post_app_info && obj.text_post_app_info.share_info;
+            if (!info) continue;
+            for (const candidate of [info.quoted_attachment_post, info.quoted_post]) {
+                if (candidate && typeof candidate === 'object') quoteCandidates.push(candidate);
+            }
+        }
         let quoted = null;
-        if (quotedObj && typeof quotedObj === 'object') {
-            const qUsername = quotedObj.user && typeof quotedObj.user.username === 'string'
-                ? quotedObj.user.username : null;
-            const qMedia = extractMedia(quotedObj);
-            const qCaption = quotedObj.caption && typeof quotedObj.caption.text === 'string'
-                ? quotedObj.caption.text : '';
-            let qUrl = typeof quotedObj.permalink === 'string' && quotedObj.permalink
-                ? quotedObj.permalink : null;
-            if (!qUrl && qUsername && typeof quotedObj.code === 'string') {
-                qUrl = `https://www.threads.com/@${qUsername}/post/${quotedObj.code}`;
+        if (quoteCandidates.length) {
+            const trustedQuoteCandidates = quoteCandidates.filter(candidate => {
+                const user = candidate.user || candidate.owner;
+                return (candidate.id != null && String(candidate.id))
+                    || (candidate.pk != null && String(candidate.pk))
+                    || (typeof candidate.code === 'string' && candidate.code)
+                    || (user && typeof user.username === 'string' && user.username);
+            });
+            const quoteIds = new Set();
+            const quotePks = new Set();
+            const quoteCodes = new Set();
+            const quoteUsers = new Set();
+            for (const candidate of trustedQuoteCandidates) {
+                if (candidate.id != null && String(candidate.id)) quoteIds.add(String(candidate.id));
+                if (candidate.pk != null && String(candidate.pk)) quotePks.add(String(candidate.pk));
+                if (typeof candidate.code === 'string' && candidate.code) quoteCodes.add(candidate.code);
+                const user = candidate.user || candidate.owner;
+                if (user && typeof user.username === 'string' && user.username) {
+                    quoteUsers.add(user.username.toLowerCase());
+                }
+            }
+            const quoteAmbiguous = quoteIds.size > 1 || quotePks.size > 1
+                || quoteCodes.size > 1 || quoteUsers.size > 1;
+            const qCaptionSource = trustedQuoteCandidates.find(candidate =>
+                candidate.caption && typeof candidate.caption.text === 'string'
+            );
+            const qUserSource = trustedQuoteCandidates.find(candidate => {
+                const user = candidate.user || candidate.owner;
+                return user && typeof user.username === 'string' && user.username;
+            });
+            const qUser = qUserSource && (qUserSource.user || qUserSource.owner);
+            const qUsername = qUser ? qUser.username : null;
+            const qCodeSource = trustedQuoteCandidates.find(candidate =>
+                typeof candidate.code === 'string' && candidate.code
+            );
+            const qCode = qCodeSource ? qCodeSource.code : null;
+            const qMedia = quoteAmbiguous ? [] : selectRichestMedia(trustedQuoteCandidates);
+            const qCaption = !quoteAmbiguous && qCaptionSource
+                ? qCaptionSource.caption.text : '';
+            let qUrl = qUsername && qCode
+                ? `https://www.threads.com/@${qUsername}/post/${qCode}` : null;
+            if (!qUrl && !quoteAmbiguous) {
+                const permalinkSource = trustedQuoteCandidates.find(candidate => {
+                    if (typeof candidate.permalink !== 'string') return false;
+                    const identity = threadsPostIdentity(candidate.permalink);
+                    return identity
+                        && (!qCode || identity.code === qCode)
+                        && (!qUsername || identity.username === qUsername.toLowerCase());
+                });
+                if (permalinkSource) qUrl = permalinkSource.permalink;
             }
             if (qMedia.length || qCaption) {
                 quoted = { username: qUsername, media: qMedia, caption: qCaption, url: qUrl };
@@ -644,16 +704,17 @@ module.exports = {
 
         // caption
         let caption = '';
-        if (found && found.obj && found.obj.caption && typeof found.obj.caption.text === 'string') {
-            caption = found.obj.caption.text;
+        const captionSource = postObjects.find(obj =>
+            obj.caption && typeof obj.caption.text === 'string'
+        );
+        if (captionSource) {
+            caption = captionSource.caption.text;
         } else {
-            const capRe = new RegExp(`"caption":\\{"text":"((?:[^"\\\\]|\\\\.){0,4000}?)","`);
-            const cm2 = html.match(capRe);
-            caption = cm2 ? jstr(cm2[1]) : ogDesc;
+            caption = ogDesc;
         }
         if (caption.length > 1900) caption = caption.slice(0, 1900) + '…';
 
-        const poll = extractPoll(found && found.obj);
+        const poll = postObjects.map(extractPoll).find(Boolean) || null;
         const pollField = formatPollField(poll);
 
         // embed
@@ -664,7 +725,7 @@ module.exports = {
 
         // 作者頭像；無媒體貼文（純文字 / 投票）的 og:image 通常就是作者頭像，可作為備援。
         // 放在右上角 thumbnail，比 author icon 稍大且不會佔用大圖區。
-        const profilePic = findProfilePic(found && found.obj, html, username)
+        const profilePic = postObjects.map(findProfilePic).find(Boolean)
             || (media.length === 0 ? ogImage : null);
 
         const imageItems = media.filter(it => it.image && !it.video);
