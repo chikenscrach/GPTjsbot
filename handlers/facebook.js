@@ -30,6 +30,15 @@ const decodeEntities = (s) => s == null ? s : s
 	.replace(/&amp;/g, '&').replace(/&quot;/g, '"')
 	.replace(/&#039;|&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
+const isPhotoUrl = (value) => {
+	try {
+		const pathname = new URL(value, 'https://www.facebook.com').pathname;
+		return /\/(?:photo(?:\.php)?|photos)(?:\/|$)/i.test(pathname);
+	} catch {
+		return false;
+	}
+};
+
 module.exports = {
 	name: 'facebook',
 
@@ -70,8 +79,9 @@ module.exports = {
 				pick(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i);
 			// login 頁的 canonical 會是 .../login，視為無效
 			if (canonicalUrl && /\/login\/?$/.test(canonicalUrl)) canonicalUrl = null;
-			// 若 canonicalUrl 是單張相片，清空它以強制走 fallback 取母貼文 (post)
-			if (canonicalUrl && canonicalUrl.includes('/photos/')) canonicalUrl = null;
+			// 相片 canonical 可能是 /photo/、/photo.php 或 /{owner}/photos/...；
+			// 清空它以強制走 fallback，從外嵌頁取得真正的母貼文。
+			if (canonicalUrl && isPhotoUrl(canonicalUrl)) canonicalUrl = null;
 
 			let resultUrl = null;
 
