@@ -65,6 +65,7 @@ Logger 的 presence 與成員加入／離開監測是部署層級的選用功能
 | `BOT_STATUS` | 否 | 機器人狀態 (`online`, `idle`, `dnd`) | `online` |
 | `BOT_ACTIVITY_TYPE` | 否 | 活動類型 (`Playing`, `Watching`, `Listening`) | `Playing` |
 | `BOT_ACTIVITY_NAME` | 否 | 狀態欄顯示文字 | `GPTjsbot | /help` |
+| `BOT_DATA_DIR` | 否 | SQLite 資料目錄；建議固定絕對路徑，重啟或更新時沿用同一份資料 | 本地：專案的 `data/`；Docker：`/app/data` |
 | `LOGGER_PRESENCE_ENABLED` | 否 | 是否向 Discord 要求 Presence 與 Server Members intents；接受 `true`、`1`、`yes`、`on`（不分大小寫） | `false` |
 | `LOGGER_MEMBERS_ENABLED` | 否 | 是否向 Discord 要求 Server Members intent 並接收成員加入／離開事件；接受 `true`、`1`、`yes`、`on`（不分大小寫） | `false` |
 
@@ -87,7 +88,7 @@ docker pull ghcr.io/chikenscrach/gptjsbot:latest
 您可以選擇使用 **Docker Compose**（極力推薦，方便管理）或傳統的 **Docker Run**。
 
 ##### 💡 方式一：使用 Docker Compose（極佳維護性）
-在根目錄下建立 `docker-compose.yml` 檔案：
+專案已附上 `compose.example.yaml`，使用固定資料目錄並掛載宿主機的 `./data`：
 ```yaml
 services:
   gptjsbot:
@@ -96,13 +97,17 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      BOT_DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
 ```
-啟動服務：
+新部署啟動服務：
 ```bash
-docker-compose up -d
+docker compose -f compose.example.yaml up -d
 ```
+
+既有部署請繼續使用原 Compose 檔案及資料目錄，例如 `docker compose -f docker-compose.yml up -d`。套用範例前須確認掛載來源與 `BOT_DATA_DIR` 都仍指向原資料庫。
 
 ##### 💡 方式二：使用 Docker Run 傳統啟動
 ```bash
@@ -114,8 +119,34 @@ docker run -d \
 ```
 
 > ⚠️ **注意事項：** 
-> * 請務必掛載 `-v ./data:/app/data`，這樣內建的 SQLite 資料庫 (`bot.db`) 在容器升級或重啟時，數據（如對話上下文、提醒設定）才不會遺失。
-> * 請確認宿主機的 `./data` 資料夾具備正確的讀寫權限。
+> * 請務必掛載 `-v ./data:/app/data`，讓 SQLite 資料庫 (`bot.db`) 中的 Logger 設定、提醒與 Threads 訊息發送者紀錄在容器重建後仍可使用。
+> * 更新時沿用原有 `./data/bot.db` 與相同掛載來源；從其他目錄執行部署時，請改成原資料目錄的絕對路徑。不要用空的新資料目錄取代既有資料。
+> * 容器以 UID/GID `1001:1001` 執行。首次建立資料目錄可用 `mkdir -p data`，再以 `sudo chown 1001:1001 data` 給予寫入權限；已有資料的目錄也必須讓資料庫及 WAL 檔可讀寫。
+
+新增右鍵指令後，在目前執行中的容器註冊應用程式指令：
+```bash
+docker exec gptjsbot npm run deploy
+```
+
+#### 3. 更新映像檔並重建容器（保留設定）
+
+更新前先確認目前資料路徑與掛載。以下命令只讀取路徑，不會輸出 Token；容器名稱請換成實際名稱：
+```bash
+docker exec gptjsbot node -p "require('path').resolve(process.env.BOT_DATA_DIR || '/app/data')"
+docker inspect gptjsbot --format '{{range .Mounts}}{{println .Type .Name .Source "->" .Destination}}{{end}}'
+```
+
+掛載目的地必須涵蓋資料目錄（預設 `/app/data`）。`bind` 要沿用相同的宿主機 `Source`；`volume` 要沿用相同的 `Name`，不要把 Docker 管理的內部路徑改成 bind mount。只掛載 `bot.db` 單檔不足以保護尚在 WAL 的寫入，應掛載整個資料目錄。
+
+已確認持久掛載後，使用原 Compose 檔案更新，例如：
+```bash
+docker compose -f docker-compose.yml pull gptjsbot
+docker compose -f docker-compose.yml up -d gptjsbot
+```
+
+檔名與 service 名稱請依原部署調整；使用本專案範例的新部署則指定 `-f compose.example.yaml`。重建後再次檢查資料路徑與掛載，並用 `/logger status` 確認設定。更新不需要 `down -v`，也不要刪除仍在使用的資料卷。Docker Run 或管理介面重建時，同樣必須保留原本的掛載來源。
+
+如果更新前沒有持久掛載，先依下方「重啟後設定消失的檢查方式」保存舊容器資料，再重建。單純更換映像檔或設定 `BOT_DATA_DIR`，無法自動把舊容器內的資料移到新容器。[Docker 儲存說明](https://docs.docker.com/engine/storage/)
 
 ---
 
@@ -126,7 +157,7 @@ docker run -d \
    npm install
    ```
 
-2. **註冊 Slash (斜線) 指令**
+2. **註冊應用程式指令（斜線與訊息右鍵）**
    每當新增、修改指令或首次啟動時，請先執行此步驟：
    ```bash
    node core/deploy-commands.js
@@ -143,11 +174,12 @@ docker run -d \
 
 ```text
 GPTjsbot/
-├── commands/               # Slash 指令模組 (自動讀取)
+├── commands/               # 斜線與訊息右鍵指令模組 (自動讀取)
 │   ├── chat.js             # AI 聊天 (/chat，支援自訂模型選單)
 │   ├── reminder.js         # 設定提醒 (/reminder)
 │   ├── quest.js            # Discord 任務查詢 (/quest，列表／搜尋／統計)
 │   ├── logger.js           # 伺服器事件日誌設定 (/logger)
+│   ├── delete-threads.js   # 訊息右鍵：刪除 Threads 訊息
 │   └── ...                 # ping, avatar, info, status, help
 ├── core/                   # 核心調度邏輯
 │   ├── chat.js             # Groq API 封裝與可配置模型邏輯
@@ -155,6 +187,7 @@ GPTjsbot/
 │   ├── db.js               # SQLite 資料庫初始化（含 logger_settings 資料表）
 │   ├── deploy-commands.js  # Discord 斜線指令部署腳本
 │   ├── logger.js           # Logger 共用模組（設定讀寫、Embed 建構）
+│   ├── threads-messages.js # Threads 訊息的 Discord 發送者紀錄
 │   └── scheduler.js        # 定時提醒任務排程器
 ├── events/
 │   ├── guildMemberAdd.js   # 監聽成員加入事件（Logger）
@@ -250,6 +283,36 @@ GPTjsbot/
 *   **存取與保留**：成員與語音活動屬於敏感 metadata，建議將日誌頻道設為僅管理員可見，並依伺服器的隱私政策定期清理；Logger 本身不會另建成員或語音歷程資料庫，日誌保留時間由 Discord 頻道訊息決定。
 *   **每伺服器獨立設定**：設定以伺服器為單位儲存於 SQLite，各伺服器互不影響。
 
+#### 重啟後設定消失的檢查方式
+
+Logger 設定會立即寫入 SQLite，啟動時不會重設。若 `/logger status` 在重啟後回到預設，請確認 `BOT_DATA_DIR` 與容器掛載是否仍指向原有的 `bot.db`。Docker 重建必須保留原本的宿主機資料目錄；本地或 PM2 部署建議設定絕對 `BOT_DATA_DIR`，避免相對路徑因工作目錄不同而開啟另一份資料庫。若舊資料只留在尚未刪除的容器內，應先停止該容器並保存整個 `/app/data`（含可能存在的 `bot.db-wal`），再重建及沿用該資料目錄。
+
+若舊容器仍存在，可將資料複製到全新的復原目錄。下方 `gptjsbot-old` 請替換成保有原設定的舊容器名稱；若先前自訂 `BOT_DATA_DIR`，也要替換 `/app/data`。先停止所有會寫入這份資料庫的程序，再複製：
+```bash
+(
+  set -eu
+  docker stop gptjsbot-old
+  recovery_dir=$(mktemp -d "$PWD/gptjsbot-data-recovery.XXXXXX")
+  docker cp gptjsbot-old:/app/data/. "$recovery_dir/"
+  sudo chown -R 1001:1001 "$recovery_dir"
+  printf '復原資料目錄：%s\n' "$recovery_dir"
+)
+```
+
+將輸出的絕對路徑掛載到新容器的 `/app/data`，並設定 `BOT_DATA_DIR=/app/data`。確認 `/logger status` 已恢復後，再處理舊容器與備份；不要讓新舊 Bot 同時使用同一份資料庫。`docker cp` 可讀取已停止的容器，整個目錄複製能一併保留 SQLite WAL 檔。[Docker 複製說明](https://docs.docker.com/reference/cli/docker/container/cp/)
+
+若舊容器已移除，仍可檢查原本的 bind mount、具名或匿名 volume 及備份是否存在。只有在舊容器資料、持久儲存與備份都不存在時，才需重新設定 Logger；新版本無法重建已遺失的設定。
+
+### 🗑️ 刪除 Threads 誤傳訊息
+
+對機器人產生的 Threads 訊息按右鍵 → **應用程式 → 刪除 Threads 訊息**。原本貼上網址的 Discord 成員，或在該頻道具備「管理訊息」權限的 mod／管理員可使用；結果只有操作本人看得到。
+
+每次只刪除選中的機器人訊息。若媒體分成多則，請分別操作；原本的使用者訊息會保留。同一則機器人回覆若包含多個平台或網址，刪除會移除該整則回覆。
+
+新訊息的發送者會保存於 SQLite，因此重啟後或原訊息被刪除後仍能辨識本人。更新前的 Threads 主回覆可透過仍存在的原訊息確認本人；舊版獨立媒體批次沒有發送者紀錄，須由 mod 使用 Discord 原生刪除功能處理。
+
+新增此功能後須執行 `npm run deploy` 並重啟 Bot，右鍵選單才會出現新指令。
+
 ### 🔗 自動網址轉換對照表 (Embed Fixer)
 當一般使用者發送以下平台網址時，機器人會**自動刪除原先失效或難看的預覽**，並改寫為能完美呈現影音預覽的替代連結：
 
@@ -261,7 +324,7 @@ GPTjsbot/
 | `instagram.com` | `kkinstagram.com` | 修正 IG 貼文、Reels 影片無法預覽的問題 |
 | `bsky.app` | `fxbsky.app` | 修正 Bluesky 預覽 |
 | `bilibili.com` / `b23.tv` | `vxbilibili.com` / `vxb23.tv` | 修正 B 站影片預覽 |
-| `threads.net` | `threads.com` | 移除 `www.` 與惱人的 `?xpt=` 追蹤參數 |
+| `threads.net` / `threads.com` | Bot 直接產生媒體預覽 | 原文與引用連結統一使用 `https://www.threads.com/...`，移除追蹤參數 |
 | `facebook.com` / `fb.watch` | `facebed.com` | 自動解析真實貼文 ID，排除登入牆限制 |
 | `youtube.com` | `youtu.be` | 自動標準化為 YouTube 短網址 |
 

@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
+const { ApplicationCommandType, SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -8,10 +8,13 @@ module.exports = {
     // 指令啟動時已載入 client.commands，直接使用即可，不必重新掃描檔案
     const fields = interaction.client.commands
       .filter(command => command.data.name !== "help")
-      .map(command => ({
+      .map(command => command.data.type === ApplicationCommandType.Message ? {
+        name: `右鍵 → 應用程式 → ${command.data.name}`,
+        value: '刪除選中的 Threads 機器人訊息；限原發送者或具備「管理訊息」權限的成員。',
+      } : {
         name: `/${command.data.name}`,
         value: command.data.description,
-      }));
+      });
 
     const helpEmbed = new EmbedBuilder()
       .setColor(0x00bfff)

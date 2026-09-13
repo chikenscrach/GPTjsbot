@@ -37,7 +37,8 @@ RUN --mount=type=cache,target=/root/.npm \
 FROM node:22.23.1-bookworm-slim AS runner
 
 ENV NODE_ENV=production \
-    NODE_NO_WARNINGS=1
+    NODE_NO_WARNINGS=1 \
+    BOT_DATA_DIR=/app/data
 
 WORKDIR /app
 

@@ -66,9 +66,9 @@ client.once(Events.ClientReady, () => {
 });
 
 
-// Slash 指令事件
+// Slash 與訊息右鍵指令事件
 client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
   if (!command) return;

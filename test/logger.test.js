@@ -431,10 +431,76 @@ test('legacy logger schema migration is repeatable', () => {
         env: { ...process.env, BOT_DATA_DIR: legacyDir },
         encoding: 'utf8',
       });
+      assert.ifError(result.error);
       assert.equal(result.status, 0, result.stderr || result.stdout);
     }
   } finally {
     rmSync(legacyDir, { recursive: true, force: true });
+  }
+});
+
+test('logger settings survive clean and abrupt process restarts with a persistent data directory', () => {
+  const restartDir = mkdtempSync(join(tmpdir(), 'gptjsbot-logger-restart-'));
+  const loggerPath = require.resolve('../core/logger');
+  const dbPath = require.resolve('../core/db');
+  const settings = {
+    channel_id: 'restart-log-channel',
+    enabled: 1,
+    log_presence: 0,
+    log_message_delete: 0,
+    log_message_update: 1,
+    log_member_join: 1,
+    log_member_leave: 1,
+    log_voice: 1,
+    exclude_channels: 'restart-channel,restart-category',
+    exclude_bots: 0,
+  };
+
+  try {
+    for (const shutdown of ['clean', 'abrupt']) {
+      const guildId = `restart-${shutdown}-guild`;
+      const env = { ...process.env, BOT_DATA_DIR: join(restartDir, shutdown) };
+      const writeScript = [
+        `const logger = require(${JSON.stringify(loggerPath)});`,
+        `logger.updateSetting(${JSON.stringify(guildId)}, ${JSON.stringify(settings)});`,
+        shutdown === 'clean'
+          ? `require(${JSON.stringify(dbPath)}).close();`
+          : "process.kill(process.pid, 'SIGKILL');",
+      ].join('\n');
+      const writeResult = spawnSync(process.execPath, ['-e', writeScript], {
+        cwd: join(__dirname, '..'),
+        env,
+        encoding: 'utf8',
+      });
+      assert.ifError(writeResult.error);
+      if (shutdown === 'abrupt') {
+        assert.equal(writeResult.signal, 'SIGKILL', writeResult.stderr);
+      } else {
+        assert.equal(writeResult.status, 0, writeResult.stderr);
+      }
+
+      const readScript = [
+        `const logger = require(${JSON.stringify(loggerPath)});`,
+        `process.stdout.write(JSON.stringify(logger.getSettings(${JSON.stringify(guildId)})));`,
+        `require(${JSON.stringify(dbPath)}).close();`,
+      ].join('\n');
+      // A fresh process starts from another working directory, as can happen
+      // when a service manager restarts the bot. The absolute data path wins.
+      for (let restart = 0; restart < 2; restart += 1) {
+        const readResult = spawnSync(process.execPath, ['-e', readScript], {
+          cwd: restartDir,
+          env,
+          encoding: 'utf8',
+        });
+        assert.ifError(readResult.error);
+        assert.equal(readResult.status, 0, readResult.stderr);
+        const { updated_at, ...restored } = JSON.parse(readResult.stdout);
+        assert.deepEqual(restored, { guild_id: guildId, ...settings });
+        assert.ok(updated_at > 0);
+      }
+    }
+  } finally {
+    rmSync(restartDir, { recursive: true, force: true });
   }
 });
 

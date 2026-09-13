@@ -1,0 +1,13 @@
+# 新部署：docker compose -f compose.example.yaml up -d
+# 既有部署請沿用原 Compose 檔及資料目錄，避免切換到新的空資料庫。
+services:
+  gptjsbot:
+    image: ghcr.io/chikenscrach/gptjsbot:latest
+    container_name: gptjsbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BOT_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data

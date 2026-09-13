@@ -121,8 +121,21 @@ test('resolved share link keeps the login notice when a public profile leads to 
     assert.equal(result.message, LOCK_NOTICE);
     assert.equal(
         result.components[0].components[0].url,
-        'https://threads.com/@kulomi.i/post/DbyOIPhiRB0',
+        'https://www.threads.com/@kulomi.i/post/DbyOIPhiRB0',
     );
+});
+
+test('private-profile login notice links to the canonical www post URL', async () => {
+    const canonicalUrl = 'https://www.threads.com/@private.user/post/PrivatePost';
+    const result = await withFetchScript([
+        { url: canonicalUrl, status: 302, location: '/?error=invalid_post' },
+        { url: INVALID_POST_URL },
+        { url: 'https://www.threads.com/@private.user', status: 302, location: '/login' },
+    ], () => threads.resolve('https://threads.net/@private.user/post/PrivatePost?xmt=tracking'));
+
+    assert.equal(result.type, 'notice');
+    assert.equal(result.message, LOCK_NOTICE);
+    assert.equal(result.components[0].components[0].url, canonicalUrl);
 });
 
 test('share link that never resolves to a canonical post keeps the deleted notice', async () => {
@@ -508,6 +521,40 @@ test('ordinary target quote keeps outer text, quoted media, and both link button
     assert.equal(quotedButton.style, 5);
     assert.equal(quotedButton.url, quotedUrl);
 });
+
+for (const permalink of [
+    'https://threads.com/@quoted.user/post/QuotedCode?xmt=tracking',
+    'https://threads.net/@quoted.user/post/QuotedCode',
+    '/@quoted.user/post/QuotedCode',
+]) {
+    test(`quoted permalink fallback normalizes to www: ${permalink}`, async () => {
+        const canonicalUrl = 'https://www.threads.com/@target.user/post/QuotePermalink';
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            chunks: [{
+                code: 'QuotePermalink',
+                caption: { text: 'Outer quote caption' },
+                text_post_app_info: {
+                    share_info: {
+                        quoted_post: {
+                            code: 'QuotedCode',
+                            permalink,
+                            caption: { text: 'Quoted post caption' },
+                        },
+                    },
+                },
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        const quotedButton = result.components[0].components[1];
+        assert.equal(quotedButton.label, '開啟引用原文');
+        assert.equal(quotedButton.url, 'https://www.threads.com/@quoted.user/post/QuotedCode');
+    });
+}
 
 test('duplicate quote placeholder cannot hide a richer compatible quote', async () => {
     const canonicalUrl = 'https://www.threads.com/@target.user/post/QuoteDuplicate';

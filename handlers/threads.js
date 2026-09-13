@@ -574,7 +574,7 @@ module.exports = {
                 new ButtonBuilder()
                     .setStyle(ButtonStyle.Link)
                     .setLabel('開啟原文')
-                    .setURL(`https://threads.com/@${usernameFromUrl}/post/${postCode}`)
+                    .setURL(`https://www.threads.com/@${usernameFromUrl}/post/${postCode}`)
             );
             const message = access === 'login' || resolvedSharePost
                 ? '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）'
@@ -685,7 +685,10 @@ module.exports = {
                         && (!qCode || identity.code === qCode)
                         && (!qUsername || identity.username === qUsername.toLowerCase());
                 });
-                if (permalinkSource) qUrl = permalinkSource.permalink;
+                if (permalinkSource) {
+                    const identity = threadsPostIdentity(permalinkSource.permalink);
+                    qUrl = `https://www.threads.com/@${identity.username}/post/${identity.code}`;
+                }
             }
             if (qMedia.length || qCaption) {
                 quoted = { username: qUsername, media: qMedia, caption: qCaption, url: qUrl };

@@ -28,6 +28,14 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_reminders_remind_at ON reminders (remind_at);
 
+  CREATE TABLE IF NOT EXISTS threads_messages (
+    message_id TEXT PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    source_message_id TEXT NOT NULL,
+    author_id TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS logger_settings (
     guild_id TEXT PRIMARY KEY,
     channel_id TEXT,
