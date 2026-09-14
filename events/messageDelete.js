@@ -1,12 +1,12 @@
 const { Events } = require('discord.js');
 const logger = require('../core/logger');
-const { forgetThreadsMessage } = require('../core/threads-messages');
+const { forgetConvertedMessage } = require('../core/converted-messages');
 
 module.exports = {
   name: Events.MessageDelete,
   async execute(message) {
     if (!message) return;
-    if (message.id) forgetThreadsMessage(message.id);
+    if (message.id) forgetConvertedMessage(message.id);
 
     // 已刪除的 partial 訊息無法再由 REST 取回；保留它仍帶有的 ID、頻道等
     // metadata 交給 builder 呈現，內容未知時不得假裝已取得完整原文。

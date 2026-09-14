@@ -1,6 +1,6 @@
 const { Events } = require('discord.js');
 const logger = require('../core/logger');
-const { forgetThreadsMessage } = require('../core/threads-messages');
+const { forgetConvertedMessage } = require('../core/converted-messages');
 
 module.exports = {
   name: Events.MessageBulkDelete,
@@ -17,7 +17,7 @@ module.exports = {
     const embeds = [];
 
     for (const message of messages.values()) {
-      if (message?.id) forgetThreadsMessage(message.id);
+      if (message?.id) forgetConvertedMessage(message.id);
       if (!message || logger.shouldIgnore(settings, 'delete', message, message.author)) continue;
 
       const embed = logger.buildMessageDeleteEmbed(message);

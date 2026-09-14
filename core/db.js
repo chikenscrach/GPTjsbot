@@ -28,6 +28,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_reminders_remind_at ON reminders (remind_at);
 
+  -- 沿用舊表名以保留 Threads 紀錄，目前用於所有網址轉換訊息。
   CREATE TABLE IF NOT EXISTS threads_messages (
     message_id TEXT PRIMARY KEY,
     guild_id TEXT NOT NULL,

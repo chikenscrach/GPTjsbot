@@ -9,7 +9,7 @@ const {
   MessageType,
   PermissionFlagsBits,
 } = require('discord.js');
-const threadsMessages = require('../core/threads-messages');
+const convertedMessages = require('../core/converted-messages');
 
 function isThreadsPostUrl(value) {
   if (typeof value !== 'string') return false;
@@ -51,7 +51,7 @@ function isLegacyThreadsReply(message, guildId, channelId) {
 
 module.exports = {
   data: new ContextMenuCommandBuilder()
-    .setName('刪除 Threads 訊息')
+    .setName('刪除訊息')
     .setType(ApplicationCommandType.Message)
     .setContexts(InteractionContextType.Guild),
 
@@ -66,14 +66,14 @@ module.exports = {
       || target.webhookId || target.interactionMetadata || target.interaction
       || target.guildId !== guildId || target.channelId !== channelId
       || target.id !== interaction.targetId) {
-      return reply('❌ 請對本機器人傳送的 Threads 訊息使用這個指令。');
+      return reply('❌ 請對本機器人傳送的網址轉換訊息使用這個指令。');
     }
 
     let record;
     try {
-      record = threadsMessages.getThreadsMessage(target.id, guildId, channelId);
+      record = convertedMessages.getConvertedMessage(target.id, guildId, channelId);
     } catch (err) {
-      console.warn('[Threads] 無法讀取訊息擁有者：', err?.message || err);
+      console.warn('[網址轉換] 無法讀取訊息擁有者：', err?.message || err);
       return reply('❌ 暫時無法確認這則訊息的擁有者，請稍後再試。');
     }
 
@@ -82,10 +82,10 @@ module.exports = {
     let authorId = record?.author_id;
     if (!record) {
       if (!isLegacyThreadsReply(target, guildId, channelId)) {
-        return reply('❌ 找不到這則訊息的 Threads 紀錄；可能已刪除，或是無法辨識的舊版額外媒體訊息。');
+        return reply('❌ 找不到這則訊息的網址轉換紀錄；可能已刪除，或是無法辨識的舊版訊息。');
       }
 
-      // 舊版主訊息沒有資料庫紀錄，僅以實際回覆的 Discord 訊息認定本人。
+      // 舊版 Threads 主訊息沒有資料庫紀錄，僅以實際回覆的 Discord 訊息認定本人。
       if (!isModerator) {
         let source;
         try {
@@ -95,7 +95,7 @@ module.exports = {
           });
         } catch (err) {
           if (Number(err?.code) !== 10008) {
-            console.warn('[Threads] 無法取得原始訊息：', err?.message || err);
+            console.warn('[網址轉換] 無法取得原始訊息：', err?.message || err);
           }
           return reply('❌ 無法確認原始發文者（原訊息可能已刪除），請由有「管理訊息」權限的成員刪除。');
         }
@@ -109,7 +109,7 @@ module.exports = {
     }
 
     if (!isModerator && authorId !== interaction.user.id) {
-      return reply('❌ 只有原始發文者或有「管理訊息」權限的成員可以刪除這則 Threads 訊息。');
+      return reply('❌ 只有原始發文者或有「管理訊息」權限的成員可以刪除這則網址轉換訊息。');
     }
 
     let alreadyDeleted = false;
@@ -120,16 +120,16 @@ module.exports = {
       if (Number(err?.code) === 10008) {
         alreadyDeleted = true;
       } else {
-        console.warn('[Threads] 無法刪除訊息：', err?.message || err);
+        console.warn('[網址轉換] 無法刪除訊息：', err?.message || err);
         return reply('❌ 無法刪除這則訊息，請確認機器人仍可存取該頻道後再試。');
       }
     }
 
     try {
-      threadsMessages.forgetThreadsMessage(target.id);
+      convertedMessages.forgetConvertedMessage(target.id);
     } catch (err) {
-      console.warn('[Threads] 無法清除已刪除訊息的紀錄：', err?.message || err);
+      console.warn('[網址轉換] 無法清除已刪除訊息的紀錄：', err?.message || err);
     }
-    return reply(alreadyDeleted ? '✅ 這則 Threads 訊息已經不存在。' : '✅ 已刪除這則 Threads 訊息。');
+    return reply(alreadyDeleted ? '✅ 這則網址轉換訊息已經不存在。' : '✅ 已刪除這則網址轉換訊息。');
   },
 };

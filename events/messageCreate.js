@@ -1,6 +1,6 @@
 const { Events, EmbedBuilder } = require('discord.js');
 const handlers = require('../handlers');
-const { recordThreadsMessage } = require('../core/threads-messages');
+const { recordConvertedMessage } = require('../core/converted-messages');
 
 // Discord 單一訊息的附件上限
 const MAX_ATTACH_PER_MSG = 10;
@@ -21,9 +21,9 @@ async function convertUrl(url) {
 		if (!result) return null;
 		// 與原網址相同時視為無轉換，避免回覆重複的連結
 		if (typeof result === 'string') return result !== url ? { type: 'url', value: result } : null;
-		if (result && result.type === 'embed' && (result.embed || Array.isArray(result.embeds))) return { ...result, provider: handler.name };
+		if (result && result.type === 'embed' && (result.embed || Array.isArray(result.embeds))) return { ...result };
 		// handler 回報的提示文字（例如貼文已刪除）
-		if (result && result.type === 'notice' && result.message) return { ...result, provider: handler.name };
+		if (result && result.type === 'notice' && result.message) return { ...result };
 		if (typeof result === 'object' && result.url) return { type: 'url', value: result.url };
 		return null;
 	} catch (err) {
@@ -32,15 +32,13 @@ async function convertUrl(url) {
 	}
 }
 
-async function sendConvertedMessage(source, payload, isThreads) {
+async function sendConvertedMessage(source, payload) {
 	const sent = await source.channel.send(payload);
-	if (isThreads) {
-		try {
-			recordThreadsMessage(sent, source);
-		} catch (err) {
-			// 發送已成功，不能因記錄失敗再走附件 fallback，否則會重複發送。
-			console.error('無法保存 Threads 訊息發送者：', err);
-		}
+	try {
+		recordConvertedMessage(sent, source);
+	} catch (err) {
+		// 發送已成功，不能因記錄失敗再走附件 fallback，否則會重複發送。
+		console.error('無法保存網址轉換訊息發送者：', err);
 	}
 	return sent;
 }
@@ -63,8 +61,6 @@ module.exports = {
 		const embedItems  = items.filter(i => i.type === 'embed' && (i.embed || Array.isArray(i.embeds)));
 		const noticeItems = items.filter(i => i.type === 'notice');
 		const noticeTexts = noticeItems.map(i => i.message);
-		const mainHasThreads = [...embedItems, ...noticeItems].some(item => item.provider === 'threads');
-
 		// 準備主訊息
 		const mainEmbeds = embedItems
 			.flatMap(i => Array.isArray(i.embeds) ? i.embeds : (i.embed ? [i.embed] : []))
@@ -72,8 +68,8 @@ module.exports = {
 			.slice(0, 10);
 		// 多則貼文的附件合併後可能超過單一訊息上限，超出的部分分批到後續訊息
 		const allFiles = embedItems.flatMap(item =>
-			(Array.isArray(item.files) ? item.files : []).map(file => ({ file, provider: item.provider })));
-		const mainFiles = allFiles.slice(0, MAX_ATTACH_PER_MSG).map(entry => entry.file);
+			(Array.isArray(item.files) ? item.files : []));
+		const mainFiles = allFiles.slice(0, MAX_ATTACH_PER_MSG);
 		const overflowFiles = allFiles.slice(MAX_ATTACH_PER_MSG);
 		// handler 附帶的按鈕列（如 Threads 的「開啟原文」，notice 提示也可能附帶）；
 		// Discord 單一訊息最多 5 列
@@ -104,7 +100,7 @@ module.exports = {
 
 		if (payload.content || (payload.embeds && payload.embeds.length) || (payload.files && payload.files.length)) {
 			try {
-				await sendConvertedMessage(message, payload, mainHasThreads);
+				await sendConvertedMessage(message, payload);
 			} catch (err) {
 				console.warn('無法送出轉換後的訊息：', err);
 				// 附件上傳失敗（如超過伺服器檔案大小上限）時，退回純 embed / 連結再試一次
@@ -112,7 +108,7 @@ module.exports = {
 					delete payload.files;
 					if (payload.content || payload.embeds) {
 						try {
-							await sendConvertedMessage(message, payload, mainHasThreads);
+							await sendConvertedMessage(message, payload);
 						} catch (err2) {
 							console.warn('退回無附件訊息仍失敗：', err2);
 						}
@@ -127,13 +123,12 @@ module.exports = {
 			const batch = overflowFiles.slice(i, i + MAX_ATTACH_PER_MSG);
 			extra.push({
 				content: i === 0 ? '📎 其他媒體：' : undefined,
-				files: batch.map(entry => entry.file),
-				isThreads: batch.some(entry => entry.provider === 'threads'),
+				files: batch,
 			});
 		}
 		for (const item of embedItems) {
 			if (Array.isArray(item.additionalMessages)) {
-				extra.push(...item.additionalMessages.map(msg => ({ ...msg, isThreads: item.provider === 'threads' })));
+				extra.push(...item.additionalMessages);
 			}
 		}
 		for (const msg of extra) {
@@ -143,7 +138,7 @@ module.exports = {
 					files:   msg.files,
 					embeds:  msg.embeds ? msg.embeds.map(e => new EmbedBuilder(e)) : undefined,
 					allowedMentions: { repliedUser: false },
-				}, msg.isThreads);
+				});
 			} catch (err) {
 				console.warn('無法送出額外媒體訊息：', err);
 			}

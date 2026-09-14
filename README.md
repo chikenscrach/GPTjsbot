@@ -179,7 +179,7 @@ GPTjsbot/
 │   ├── reminder.js         # 設定提醒 (/reminder)
 │   ├── quest.js            # Discord 任務查詢 (/quest，列表／搜尋／統計)
 │   ├── logger.js           # 伺服器事件日誌設定 (/logger)
-│   ├── delete-threads.js   # 訊息右鍵：刪除 Threads 訊息
+│   ├── delete-message.js   # 訊息右鍵：刪除網址轉換訊息
 │   └── ...                 # ping, avatar, info, status, help
 ├── core/                   # 核心調度邏輯
 │   ├── chat.js             # Groq API 封裝與可配置模型邏輯
@@ -187,7 +187,7 @@ GPTjsbot/
 │   ├── db.js               # SQLite 資料庫初始化（含 logger_settings 資料表）
 │   ├── deploy-commands.js  # Discord 斜線指令部署腳本
 │   ├── logger.js           # Logger 共用模組（設定讀寫、Embed 建構）
-│   ├── threads-messages.js # Threads 訊息的 Discord 發送者紀錄
+│   ├── converted-messages.js # 網址轉換訊息的 Discord 發送者紀錄
 │   └── scheduler.js        # 定時提醒任務排程器
 ├── events/
 │   ├── guildMemberAdd.js   # 監聽成員加入事件（Logger）
@@ -303,15 +303,15 @@ Logger 設定會立即寫入 SQLite，啟動時不會重設。若 `/logger statu
 
 若舊容器已移除，仍可檢查原本的 bind mount、具名或匿名 volume 及備份是否存在。只有在舊容器資料、持久儲存與備份都不存在時，才需重新設定 Logger；新版本無法重建已遺失的設定。
 
-### 🗑️ 刪除 Threads 誤傳訊息
+### 🗑️ 刪除網址轉換訊息
 
-對機器人產生的 Threads 訊息按右鍵 → **應用程式 → 刪除 Threads 訊息**。原本貼上網址的 Discord 成員，或在該頻道具備「管理訊息」權限的 mod／管理員可使用；結果只有操作本人看得到。
+對機器人產生的網址轉換訊息按右鍵 → **應用程式 → 刪除訊息**。適用於所有支援的平台，包括 Threads、Facebook、X／Twitter、Instagram、TikTok、Pixiv、Bluesky、Bilibili 與 YouTube；轉換連結、媒體預覽、額外媒體及解析提示都可使用。原本貼上網址的 Discord 成員，或在該頻道具備「管理訊息」權限的 mod／管理員可使用；結果只有操作本人看得到。
 
 每次只刪除選中的機器人訊息。若媒體分成多則，請分別操作；原本的使用者訊息會保留。同一則機器人回覆若包含多個平台或網址，刪除會移除該整則回覆。
 
-新訊息的發送者會保存於 SQLite，因此重啟後或原訊息被刪除後仍能辨識本人。更新前的 Threads 主回覆可透過仍存在的原訊息確認本人；舊版獨立媒體批次沒有發送者紀錄，須由 mod 使用 Discord 原生刪除功能處理。
+更新後所有網址轉換訊息的發送者都會保存於 SQLite，因此重啟後或原訊息被刪除後仍能辨識本人。既有 Threads 紀錄會保留；更舊且沒有紀錄的 Threads 主回覆可透過仍存在的原訊息確認本人。更新前未記錄的其他平台訊息與舊版獨立媒體批次，須由 mod 使用 Discord 原生刪除功能處理。
 
-新增此功能後須執行 `npm run deploy` 並重啟 Bot，右鍵選單才會出現新指令。
+更新後須執行 `npm run deploy` 並重啟 Bot，右鍵選單才會從「刪除 Threads 訊息」更新為「刪除訊息」。
 
 ### 🔗 自動網址轉換對照表 (Embed Fixer)
 當一般使用者發送以下平台網址時，機器人會**自動刪除原先失效或難看的預覽**，並改寫為能完美呈現影音預覽的替代連結：

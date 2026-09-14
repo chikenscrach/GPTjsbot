@@ -10,7 +10,7 @@ module.exports = {
       .filter(command => command.data.name !== "help")
       .map(command => command.data.type === ApplicationCommandType.Message ? {
         name: `右鍵 → 應用程式 → ${command.data.name}`,
-        value: '刪除選中的 Threads 機器人訊息；限原發送者或具備「管理訊息」權限的成員。',
+        value: '刪除選中的機器人網址轉換訊息（含額外媒體）；限原發送者或具備「管理訊息」權限的成員。',
       } : {
         name: `/${command.data.name}`,
         value: command.data.description,

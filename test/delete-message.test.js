@@ -17,11 +17,11 @@ const {
   PermissionsBitField,
 } = require('discord.js');
 
-const testDataDir = mkdtempSync(join(tmpdir(), 'gptjsbot-delete-threads-test-'));
+const testDataDir = mkdtempSync(join(tmpdir(), 'gptjsbot-delete-message-test-'));
 process.env.BOT_DATA_DIR = testDataDir;
 const db = require('../core/db');
-const store = require('../core/threads-messages');
-const command = require('../commands/delete-threads');
+const store = require('../core/converted-messages');
+const command = require('../commands/delete-message');
 
 after(() => {
   db.close();
@@ -93,13 +93,13 @@ function makeFixture({
       return payload;
     },
   };
-  if (stored) store.recordThreadsMessage(target, source);
+  if (stored) store.recordConvertedMessage(target, source);
   return {
     source,
     target,
     interaction,
     calls,
-    record: () => store.getThreadsMessage(target.id, source.guildId, source.channelId),
+    record: () => store.getConvertedMessage(target.id, source.guildId, source.channelId),
     replyText: () => calls.filter(([type]) => type === 'reply').at(-1)?.[1].content,
     setDeleteError: error => { deleteError = error; },
   };
@@ -116,7 +116,7 @@ function assertNotDeleted(fixture) {
 
 test('message context command is available to ordinary guild members', () => {
   const data = command.data.toJSON();
-  assert.equal(data.name, '刪除 Threads 訊息');
+  assert.equal(data.name, '刪除訊息');
   assert.equal(data.type, ApplicationCommandType.Message);
   assert.deepEqual(data.contexts, [InteractionContextType.Guild]);
   assert.equal(data.default_member_permissions, undefined);
@@ -125,14 +125,33 @@ test('message context command is available to ordinary guild members', () => {
 test('original sender deletes only the selected tracked message even after source deletion', async () => {
   const fixture = makeFixture({ fetchError: { code: 10008 } });
   const otherMessage = { id: String(nextId++) };
-  store.recordThreadsMessage(otherMessage, fixture.source);
+  store.recordConvertedMessage(otherMessage, fixture.source);
   await command.execute(fixture.interaction);
   assertDeferred(fixture);
   assert.deepEqual(fixture.calls.filter(([type]) => type === 'delete'), [['delete', fixture.target.id]]);
   assert.equal(fixture.calls.some(([type]) => type === 'fetch'), false);
   assert.equal(fixture.record(), undefined);
-  assert.ok(store.getThreadsMessage(otherMessage.id, 'guild', 'channel'));
+  assert.ok(store.getConvertedMessage(otherMessage.id, 'guild', 'channel'));
   assert.match(fixture.replyText(), /已刪除/);
+});
+
+test('the new converted-message store reads and removes a legacy Threads row', async () => {
+  const fixture = makeFixture({ stored: false });
+  db.prepare(`
+    INSERT INTO threads_messages (message_id, guild_id, channel_id, source_message_id, author_id)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(fixture.target.id, 'guild', 'channel', fixture.source.id, 'owner');
+
+  assert.deepEqual(store.getConvertedMessage(fixture.target.id, 'guild', 'channel'), {
+    message_id: fixture.target.id,
+    guild_id: 'guild',
+    channel_id: 'channel',
+    source_message_id: fixture.source.id,
+    author_id: 'owner',
+  });
+  await command.execute(fixture.interaction);
+  assert.deepEqual(fixture.calls.filter(([type]) => type === 'delete'), [['delete', fixture.target.id]]);
+  assert.equal(store.getConvertedMessage(fixture.target.id, 'guild', 'channel'), undefined);
 });
 
 test('tracked standalone attachment can be deleted by its original sender', async () => {
@@ -142,6 +161,55 @@ test('tracked standalone attachment can be deleted by its original sender', asyn
   await command.execute(fixture.interaction);
   assert.equal(fixture.record(), undefined);
   assert.match(fixture.replyText(), /已刪除/);
+});
+
+const nonThreadsConversions = [
+  ['pure URL', { content: 'https://example.test/post/123', embeds: [] }],
+  ['embed', {
+    content: '',
+    embeds: [{ title: 'Example', description: 'Converted preview', url: 'https://example.test/post/123' }],
+  }],
+  ['notice', { content: '⚠️ 網址無法解析或內容已刪除', embeds: [] }],
+  ['extra media', {
+    type: MessageType.Default,
+    reference: null,
+    content: '📎 其他媒體：',
+    embeds: [],
+  }],
+];
+
+for (const [label, targetOverrides] of nonThreadsConversions) {
+  test(`recorded non-Threads ${label} can be deleted by its original sender`, async () => {
+    const fixture = makeFixture({ targetOverrides });
+    await command.execute(fixture.interaction);
+    assert.deepEqual(fixture.calls.filter(([type]) => type === 'delete'), [['delete', fixture.target.id]]);
+    assert.equal(fixture.record(), undefined);
+    assert.match(fixture.replyText(), /已刪除/);
+  });
+
+  test(`recorded non-Threads ${label} can be deleted by a channel moderator`, async () => {
+    const fixture = makeFixture({ userId: 'moderator', permissions: [PermissionFlagsBits.ManageMessages], targetOverrides });
+    await command.execute(fixture.interaction);
+    assert.deepEqual(fixture.calls.filter(([type]) => type === 'delete'), [['delete', fixture.target.id]]);
+    assert.equal(fixture.record(), undefined);
+    assert.match(fixture.replyText(), /已刪除/);
+  });
+
+  test(`another member cannot delete recorded non-Threads ${label}`, async () => {
+    const fixture = makeFixture({ userId: 'another-member', targetOverrides });
+    await command.execute(fixture.interaction);
+    assertNotDeleted(fixture);
+    assert.ok(fixture.record());
+  });
+}
+
+test('deleting a recorded conversion leaves the original user message untouched', async () => {
+  const fixture = makeFixture({
+    targetOverrides: { content: 'https://example.test/post/123', embeds: [] },
+  });
+  await command.execute(fixture.interaction);
+  assert.deepEqual(fixture.calls.filter(([type]) => type === 'delete'), [['delete', fixture.target.id]]);
+  assert.equal(fixture.record(), undefined);
 });
 
 for (const permissions of [[], [PermissionFlagsBits.ManageGuild]]) {
@@ -293,6 +361,13 @@ for (const [label, overrides] of [
     assert.equal(fixture.calls.some(([type]) => type === 'fetch'), false);
   });
 }
+
+test('an ordinary unrecorded bot reply cannot be deleted by the apparent original sender', async () => {
+  const fixture = makeFixture({ stored: false, targetOverrides: { embeds: [] } });
+  await command.execute(fixture.interaction);
+  assertNotDeleted(fixture);
+  assert.equal(fixture.calls.some(([type]) => type === 'fetch'), false);
+});
 
 for (const [label, change] of [
   ['cross-channel reference', reference => { reference.channelId = 'another-channel'; }],
