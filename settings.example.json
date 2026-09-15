@@ -1,0 +1,49 @@
+{
+  "urlConversion": {
+    "enabled": true,
+    "handlers": {
+      "twitter": { "enabled": true },
+      "facebook": { "enabled": true },
+      "threads": { "enabled": true },
+      "youtube": { "enabled": true }
+    },
+    "rules": {
+      "pixiv": {
+        "enabled": true,
+        "hosts": ["pixiv.net"],
+        "targetHost": "phixiv.net",
+        "stripQuery": true
+      },
+      "tiktok": {
+        "enabled": true,
+        "hosts": ["tiktok.com"],
+        "targetHost": "tnktok.com",
+        "stripQuery": true
+      },
+      "instagram": {
+        "enabled": true,
+        "hosts": ["instagram.com"],
+        "targetHost": "kkinstagram.com",
+        "stripQuery": true
+      },
+      "bluesky": {
+        "enabled": true,
+        "hosts": ["bsky.app"],
+        "targetHost": "fxbsky.app",
+        "stripQuery": true
+      },
+      "bilibili": {
+        "enabled": true,
+        "hosts": ["bilibili.com"],
+        "targetHost": "vxbilibili.com",
+        "stripQuery": true
+      },
+      "b23": {
+        "enabled": true,
+        "hosts": ["b23.tv"],
+        "targetHost": "vxb23.tv",
+        "stripQuery": true
+      }
+    }
+  }
+}

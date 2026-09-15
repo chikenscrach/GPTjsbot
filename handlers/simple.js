@@ -1,30 +1,28 @@
-// handlers/simple.js
-// 簡單域名替換的平台（pixiv, tiktok, instagram, bsky, bilibili, b23.tv）
-
-const replacements = {
-	'pixiv.net': 'phixiv.net',
-	'tiktok.com': 'tnktok.com',
-	'instagram.com': 'kkinstagram.com',
-	'bsky.app': 'fxbsky.app',
-	'bilibili.com': 'vxbilibili.com',
-	'b23.tv': 'vxb23.tv',
-};
+// 簡單網域轉換的內容由 settings.json / settings.example.json 定義。
+const { settings, normalizeHostname } = require('../core/url-config');
+const rulesByHost = new Map(Object.values(settings.rules)
+	.flatMap(rule => rule.hosts.map(host => [host, rule])));
 
 module.exports = {
 	name: 'simple',
 
 	match(hostname) {
-		return hostname in replacements;
+		return rulesByHost.has(normalizeHostname(hostname));
+	},
+
+	getRule(hostname) {
+		return rulesByHost.get(normalizeHostname(hostname));
 	},
 
 	async resolve(url) {
 		try {
-			const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-			const replacement = replacements[hostname];
-			if (!replacement) return null;
-
-			const regex = new RegExp(`(https?:\\/\\/)(www\\.)?${hostname.replace(/\./g, '\\.')}`, 'i');
-			const newUrl = url.replace(regex, `$1${replacement}`).split('?')[0];
+			const parsed = new URL(url);
+			if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.port) return null;
+			const rule = rulesByHost.get(normalizeHostname(parsed.hostname));
+			if (!rule) return null;
+			parsed.hostname = rule.targetHost;
+			if (rule.stripQuery) parsed.search = '';
+			const newUrl = parsed.toString();
 			return newUrl !== url ? newUrl : null;
 		} catch {
 			return null;

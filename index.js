@@ -2,9 +2,10 @@ require('dotenv').config();
 require('./core/db'); // 順便初始化 DB
 const fs = require('fs');
 const path = require('path');
-const { Client, Collection, Events, MessageFlags } = require('discord.js');
+const { Client, Collection, Events } = require('discord.js');
 const { buildClientOptions } = require('./core/client-options');
 const { startScheduler } = require('./core/scheduler');
+const { handleCommandInteraction } = require('./core/command-interactions');
 
 const client = new Client(buildClientOptions());
 
@@ -66,30 +67,7 @@ client.once(Events.ClientReady, () => {
 });
 
 
-// Slash 與訊息右鍵指令事件
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
-
-  const command = client.commands.get(interaction.commandName);
-  if (!command) return;
-
-  try {
-    await command.execute(interaction);
-  } catch (error) {
-    console.error(error);
-    // 指令可能已 defer 或已回覆過，依互動狀態選擇正確的回覆方式
-    try {
-      if (interaction.deferred && !interaction.replied) {
-        await interaction.editReply('❌ 執行指令時發生錯誤。');
-      } else if (interaction.replied) {
-        await interaction.followUp({ content: '❌ 執行指令時發生錯誤。', flags: MessageFlags.Ephemeral });
-      } else {
-        await interaction.reply({ content: '❌ 執行指令時發生錯誤。', flags: MessageFlags.Ephemeral });
-      }
-    } catch (err) {
-      console.error('回覆錯誤訊息失敗：', err);
-    }
-  }
-});
+// Slash、訊息右鍵與動態自動完成事件
+client.on(Events.InteractionCreate, handleCommandInteraction);
 
 client.login(process.env.DISCORD_TOKEN);

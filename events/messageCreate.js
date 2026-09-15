@@ -1,20 +1,25 @@
 const { Events, EmbedBuilder } = require('discord.js');
 const handlers = require('../handlers');
 const { recordConvertedMessage } = require('../core/converted-messages');
+const { normalizeHostname } = require('../core/url-config');
+const urlSettings = require('../core/url-settings');
 
 // Discord 單一訊息的附件上限
 const MAX_ATTACH_PER_MSG = 10;
 
-async function convertUrl(url) {
+async function convertUrl(url, guildId) {
 	let hostname;
 	try {
-		hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+		hostname = normalizeHostname(new URL(url).hostname);
 	} catch {
 		return null;
 	}
 
 	const handler = handlers.find(h => h.match(hostname));
 	if (!handler) return null;
+	const target = handler.name === 'simple' ? handler.getRule(hostname).id : handler.name;
+	// 在解析或下載媒體之前檢查；專用處理器停用後不會落入簡單轉換。
+	if (!urlSettings.getTarget(guildId, target).enabled) return { type: 'disabled' };
 
 	try {
 		const result = await handler.resolve(url);
@@ -47,14 +52,16 @@ module.exports = {
 	name: Events.MessageCreate,
 	async execute(message) {
 		if (message.author.bot) return;
+		if (!urlSettings.getMaster(message.guildId).enabled) return;
 
 		const urlRegex = /(https?:\/\/[^\s\])>]+)/g;
 		const urls = message.content.match(urlRegex);
 		if (!urls) return;
 
 		const uniqueUrls = [...new Set(urls)];
-		const results = await Promise.all(uniqueUrls.map(convertUrl));
-		const items = results.filter(Boolean);
+		const results = await Promise.all(uniqueUrls.map(url => convertUrl(url, message.guildId)));
+		const hasDisabledUrl = results.some(item => item?.type === 'disabled');
+		const items = results.filter(item => item && item.type !== 'disabled');
 		if (items.length === 0) return;
 
 		const convertedUrls = items.filter(i => i.type === 'url').map(i => i.value);
@@ -83,7 +90,8 @@ module.exports = {
 			mainFiles.length > 0 ||
 			convertedUrls.length > 0;
 
-		if (hasPayload) {
+		// Discord 只能隱藏整則訊息的預覽，混合停用平台時保留原預覽。
+		if (hasPayload && !hasDisabledUrl) {
 			try { await message.suppressEmbeds(true); }
 			catch (err) { console.warn('無法關閉 embed：', err.message); }
 		}

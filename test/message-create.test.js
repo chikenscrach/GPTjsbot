@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { after, test } = require('node:test');
-const { mkdtempSync, rmSync } = require('node:fs');
+const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -10,6 +10,8 @@ const { Collection } = require('discord.js');
 
 const testDataDir = mkdtempSync(join(tmpdir(), 'gptjsbot-message-create-'));
 process.env.BOT_DATA_DIR = testDataDir;
+process.env.SETTINGS_FILE = join(testDataDir, 'settings.json');
+writeFileSync(process.env.SETTINGS_FILE, '{}');
 const db = require('../core/db');
 const threads = require('../handlers/threads');
 const facebook = require('../handlers/facebook');

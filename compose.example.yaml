@@ -11,3 +11,11 @@ services:
       BOT_DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
+      # 自訂網址規則時，先建立 settings.json，再取消下列註解。
+      # 未掛載時沿用內附預設。既有部署請保留上方原有的資料掛載。
+      # - type: bind
+      #   source: ./settings.json
+      #   target: /app/settings.json
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
