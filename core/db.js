@@ -28,6 +28,18 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_reminders_remind_at ON reminders (remind_at);
 
+  -- 僅保存使用者明確覆寫的開關；無資料列時沿用設定檔的預設值。
+  CREATE TABLE IF NOT EXISTS url_conversion_settings (
+    guild_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  );
+  CREATE TABLE IF NOT EXISTS url_conversion_overrides (
+    guild_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    PRIMARY KEY (guild_id, target)
+  );
+
   -- 沿用舊表名以保留 Threads 紀錄，目前用於所有網址轉換訊息。
   CREATE TABLE IF NOT EXISTS threads_messages (
     message_id TEXT PRIMARY KEY,

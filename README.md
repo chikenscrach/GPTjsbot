@@ -19,7 +19,7 @@
 
 *   🤖 **AI 智慧聊天**：整合 **Groq API**，支援極速的 Llama / Mixtral 等模型對話，內建 SQLite 記憶對話上下文，自動翻譯繁體中文，且**完美支援長訊息自動分段發送**，徹底防範 Discord 2000 字元長度限制。
 *   ⚙️ **可自訂對話模型**：模型不再寫死！開發者可在 `.env` 檔案中設定全域預設模型，使用者也可以直接在 `/chat` 指令的選單中即時切換不同的官方模型（如極速的 Llama 8B、強大的 Llama 3.3 70B、GPT OSS 或是 Qwen3 等官方支援模型）。
-*   🔗 **自動網址轉換 (Embed Fixer)**：當使用者發送特定平台（如 X/Twitter, Instagram, Facebook）網址時，機器人會自動修正為可直接預覽影片/多圖的替代服務網址（例如 `fixvx.com`, `kkinstagram.com` 等）。
+*   🔗 **自動網址轉換 (Embed Fixer)**：當使用者發送特定平台（如 X/Twitter, Instagram, Facebook）網址時，機器人會自動修正為可直接預覽影片/多圖的替代服務網址（例如 `fixvx.com`, `kkinstagram.com` 等）。簡單轉換可透過 `settings.json` 更換網域或新增規則，各伺服器可用 `/url` 管理開關。
 *   🎯 **Discord 任務查詢 (Quest)**：即時抓取社群維護的任務資料，支援分頁列表、名稱／獎勵／ID／月份搜尋與 Orb 統計，並可用**獎勵類型、地區限制、年齡限制、連動任務等多重條件交叉篩選**，快速找出「還沒過期、有 Orb 又沒有地區限制」的任務。
 *   ⏰ **輕量化提醒系統**：透過內建的 SQLite 與排程器，隨時設定個人/頻道的定時提醒事項。
 *   📋 **伺服器事件日誌 (Logger)**：可選擇性啟用的事件監測系統，由伺服器管理員指定頻道接收成員上線狀態、加入／離開、語音頻道移動，以及訊息刪除與編輯等通知。支援排除特定頻道與機器人事件；訊息已在快取中時可附帶原文，未快取時仍會記錄可取得的 metadata 並清楚標示內容未知。
@@ -66,6 +66,7 @@ Logger 的 presence 與成員加入／離開監測是部署層級的選用功能
 | `BOT_ACTIVITY_TYPE` | 否 | 活動類型 (`Playing`, `Watching`, `Listening`) | `Playing` |
 | `BOT_ACTIVITY_NAME` | 否 | 狀態欄顯示文字 | `GPTjsbot | /help` |
 | `BOT_DATA_DIR` | 否 | SQLite 資料目錄；建議固定絕對路徑，重啟或更新時沿用同一份資料 | 本地：專案的 `data/`；Docker：`/app/data` |
+| `SETTINGS_FILE` | 否 | 網址規則設定檔；相對路徑以專案根目錄為基準，指定後檔案必須存在 | 專案根目錄的 `settings.json`；Docker：`/app/settings.json` |
 | `LOGGER_PRESENCE_ENABLED` | 否 | 是否向 Discord 要求 Presence 與 Server Members intents；接受 `true`、`1`、`yes`、`on`（不分大小寫） | `false` |
 | `LOGGER_MEMBERS_ENABLED` | 否 | 是否向 Discord 要求 Server Members intent 並接收成員加入／離開事件；接受 `true`、`1`、`yes`、`on`（不分大小寫） | `false` |
 
@@ -179,6 +180,7 @@ GPTjsbot/
 │   ├── reminder.js         # 設定提醒 (/reminder)
 │   ├── quest.js            # Discord 任務查詢 (/quest，列表／搜尋／統計)
 │   ├── logger.js           # 伺服器事件日誌設定 (/logger)
+│   ├── url.js              # 網址轉換開關與規則查詢 (/url)
 │   ├── delete-message.js   # 訊息右鍵：刪除網址轉換訊息
 │   └── ...                 # ping, avatar, info, status, help
 ├── core/                   # 核心調度邏輯
@@ -188,6 +190,9 @@ GPTjsbot/
 │   ├── deploy-commands.js  # Discord 斜線指令部署腳本
 │   ├── logger.js           # Logger 共用模組（設定讀寫、Embed 建構）
 │   ├── converted-messages.js # 網址轉換訊息的 Discord 發送者紀錄
+│   ├── url-config.js       # 載入與驗證外部網址規則
+│   ├── url-settings.js     # 各伺服器的網址開關與預設值
+│   ├── command-interactions.js # Slash、右鍵與動態自動完成分派
 │   └── scheduler.js        # 定時提醒任務排程器
 ├── events/
 │   ├── guildMemberAdd.js   # 監聽成員加入事件（Logger）
@@ -202,12 +207,14 @@ GPTjsbot/
 │   ├── facebook.js         # 處理 Facebook 貼文、多圖與小幫手
 │   ├── twitter.js          # 轉換 Twitter / X 連結至 Fixvx
 │   ├── threads.js          # 清理 Threads 網址與追蹤參數
-│   ├── simple.js           # Pixiv, IG, Bilibili 等簡單取代規則
+│   ├── simple.js           # 依設定檔執行簡單網域轉換
 │   ├── youtube.js          # YouTube 轉簡短網址
 │   └── index.js            # 集中匯出網址處理器
 ├── data/
 │   └── bot.db              # SQLite 本地資料庫 (自動產生)
 ├── Dockerfile              # 多階段、高安全性的 Docker 映像檔建置規則
+├── settings.example.json   # 內附網址規則預設值與可複製的範例
+├── settings.json           # 個人網址設定（選用，不納入 Git／Docker 映像）
 ├── LICENSE                 # 開源授權條款 (MIT)
 └── index.js                # 專案程式入口點
 ```
@@ -236,6 +243,7 @@ GPTjsbot/
 *   `/avatar [user]`：取得指定使用者的頭像。
 *   `/info`：取得伺服器或使用者詳細資訊。
 *   `/help`：列出所有可用指令。
+*   `/url`：管理目前伺服器的網址轉換開關，並查看各平台的狀態與目標網域。
 
 ### 📋 伺服器事件日誌 (`/logger`)
 
@@ -314,7 +322,7 @@ Logger 設定會立即寫入 SQLite，啟動時不會重設。若 `/logger statu
 更新後須執行 `npm run deploy` 並重啟 Bot，右鍵選單才會從「刪除 Threads 訊息」更新為「刪除訊息」。
 
 ### 🔗 自動網址轉換對照表 (Embed Fixer)
-當一般使用者發送以下平台網址時，機器人會**自動刪除原先失效或難看的預覽**，並改寫為能完美呈現影音預覽的替代連結：
+當一般使用者發送以下平台網址時，機器人會依啟用狀態產生替代連結或媒體預覽。下表為內附預設值；簡單網域轉換可透過設定檔調整。成功產生轉換內容時會隱藏原訊息預覽；若同一則訊息包含停用平台，則保留整則原訊息的預覽，因為 Discord 無法只隱藏其中一個網址的預覽。
 
 | 原始網址 | 轉換後網址 (修復預覽) | 備註說明 |
 | :--- | :--- | :--- |
@@ -327,6 +335,85 @@ Logger 設定會立即寫入 SQLite，啟動時不會重設。若 `/logger statu
 | `threads.net` / `threads.com` | Bot 直接產生媒體預覽 | 原文與引用連結統一使用 `https://www.threads.com/...`，移除追蹤參數 |
 | `facebook.com` / `fb.watch` | `facebed.com` | 自動解析真實貼文 ID，排除登入牆限制 |
 | `youtube.com` | `youtu.be` | 自動標準化為 YouTube 短網址 |
+
+### ⚙️ 自訂簡單網址規則 (`settings.json`)
+
+未建立設定檔時，Bot 沿用 `settings.example.json` 的預設行為。首次建立個人設定可複製範例：
+
+```bash
+test -e settings.json || cp settings.example.json settings.json
+```
+
+也可以只建立以下內容，同時更換 Instagram 網域並新增一條自訂規則。`source.example` 和 `preview.example` 是示意網域，請換成實際服務：
+
+```json
+{
+  "urlConversion": {
+    "rules": {
+      "instagram": {
+        "targetHost": "oginstagram.com"
+      },
+      "custom": {
+        "enabled": true,
+        "hosts": ["source.example", "m.source.example"],
+        "targetHost": "preview.example",
+        "stripQuery": false
+      }
+    }
+  }
+}
+```
+
+`https://source.example/item?id=123#part` 會轉成 `https://preview.example/item?id=123#part`。轉換只更換網域，保留協定、路徑及片段；目標服務仍須支援原本的網址格式。需要改寫路徑、抓取網頁或解析 API 的平台應使用專用處理器。
+
+| 設定 | 說明 |
+| :--- | :--- |
+| 規則名稱（例如 `instagram`、`custom`） | 固定 ID，供 `/url toggle` 與資料庫識別。以小寫字母開頭，限 32 字元的小寫字母、數字、`_`、`-`；更換目標網域時保留 ID，即可沿用開關設定。 |
+| `enabled` | 該規則的預設開關。使用 JSON 布林值 `true`／`false`，不要加引號。 |
+| `hosts` | 來源網域陣列。忽略大小寫、前綴 `www.` 與結尾的 `.`；其他子網域須明確列出。 |
+| `targetHost` | 目標網域，不包含 `https://`、路徑、連接埠或參數。 |
+| `stripQuery` | `true` 移除 `?` 後的查詢參數，`false` 保留。原有六條簡單規則維持 `true`；新規則預設 `false`，以免刪除必要的 `?id=...`。 |
+
+設定按規則 ID 合併：省略的規則與欄位沿用內附預設，新規則必須提供 `hosts` 和 `targetHost`。因此從個人檔案刪除內建規則會恢復預設，若要改變預設開關請設定 `enabled: false`；已經在 Discord 覆寫的伺服器仍以自己的開關為準。刪除自訂規則後，它會從轉換與選單中移除。
+
+`urlConversion.enabled` 可設定總開關的預設值；專用處理器只開放 `urlConversion.handlers.<名稱>.enabled`，名稱為 `twitter`、`facebook`、`threads`、`youtube`，解析程式及目標網址仍保留於各處理器中。所有 `enabled` 都是預設值，伺服器管理員可透過 `/url` 覆寫；它們不是禁止管理員重新啟用的全域鎖定。
+
+Bot 在啟動時載入設定。修改網域、新增規則或改變預設值後重啟即可，不需重新註冊 Discord 指令。重複的來源網域、與專用處理器衝突的 ID／網域、未知欄位或錯誤格式都會中止啟動並指出問題；停用規則也會驗證。明確設定 `SETTINGS_FILE` 時，找不到該檔案會報錯，避免意外啟用預設規則。
+
+### 🔄 伺服器網址開關 (`/url`)
+
+首次安裝此功能時，執行 `npm run deploy` 並重啟 Bot；Docker 部署可用 `docker exec gptjsbot npm run deploy`。`/url` 僅供具備「管理伺服器」權限的成員在伺服器中使用，操作結果僅本人可見。
+
+| 指令 | 行為 |
+| :--- | :--- |
+| `/url enable` | 開啟目前伺服器的總開關，保留個別平台設定。 |
+| `/url disable` | 暫停目前伺服器的所有網址轉換，保留個別平台設定。 |
+| `/url toggle target:instagram` | 切換某平台或自訂規則的開關；專用處理器也能指定，例如 `target:threads`。 |
+| `/url reset target:instagram` | 清除該平台的伺服器覆寫，重新跟隨設定檔預設值。 |
+| `/url status [page]` | 分頁查看總開關、個別開關、設定來源與簡單規則的目標網域。 |
+
+`target` 會依目前載入的規則提供動態建議；新規則不需要修改指令選單或再次 deploy。預設簡單規則名稱為 `pixiv`、`tiktok`、`instagram`、`bluesky`、`bilibili`、`b23`。
+
+開關立即寫入既有 `bot.db` 的 `url_conversion_settings`／`url_conversion_overrides`，各伺服器獨立，重啟與更新時沿用同一資料目錄即可保留。Discord 操作不會修改 JSON。實際轉換需要「伺服器總開關」和「該規則開關」都開啟；個別開關優先順序為伺服器覆寫 → 設定檔預設。總開關關閉時，toggle 仍可調整個別設定，但不會開始轉換。既有私訊轉換沿用設定檔預設，不提供私訊開關指令。
+
+### 🐳 Docker 掛載個人網址設定
+
+`compose.example.yaml` 已附上可取消註解的掛載範例。先建立宿主機的 `settings.json`，再將下列項目加入原本的 `volumes`，並保留既有資料目錄掛載：
+
+```yaml
+volumes:
+  - ./data:/app/data
+  - type: bind
+    source: ./settings.json
+    target: /app/settings.json
+    read_only: true
+    bind:
+      create_host_path: false
+```
+
+使用 Docker Run 時，加入 `--mount type=bind,src="$(pwd)/settings.json",dst=/app/settings.json,readonly`。容器需要能讀取這個檔案。`SETTINGS_FILE` 若使用自訂位置，必須填容器內的路徑，並與掛載目的地一致。
+
+首次新增掛載要以原部署設定重建容器，例如 `docker compose -f compose.example.yaml up -d gptjsbot`；後續只修改規則內容，可用 `docker compose -f compose.example.yaml restart gptjsbot` 或 `docker restart gptjsbot` 重新載入。既有部署請換成原 Compose 檔名及 service 名稱。個人 `settings.json` 已排除於 Git 和 Docker 建置內容，規則由宿主機掛載，開關則保存於原資料庫。
 
 ---
 
@@ -351,8 +438,8 @@ Logger 設定會立即寫入 SQLite，啟動時不會重設。若 `/logger statu
 3. 重新執行 `node core/deploy-commands.js` 註冊指令，並重啟 Bot。
 
 ### 如何新增網址轉換規則？
-*   如果是**簡單的域名替換**：直接編輯 `handlers/simple.js` 裡的 `domainMap`。
-*   如果是**複雜的 API 解析**：在 `handlers/` 下建立新的處理器檔案，並在 `handlers/index.js` 中註冊即可。
+*   如果是**簡單的網域替換**：在 `settings.json` 的 `urlConversion.rules` 新增一個固定 ID，設定 `hosts` 和 `targetHost`，重啟 Bot 即可。
+*   如果是**複雜的 API 解析**：在 `handlers/` 下建立具有 `name`、`match`、`resolve` 的新處理器，啟動時會自動載入並加入 `/url` 選單。處理器名稱不可與現有規則重複。
 
 ---
 

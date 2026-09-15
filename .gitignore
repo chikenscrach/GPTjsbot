@@ -5,6 +5,9 @@ node_modules/
 .env
 .env.*.local
 
+# 個人網址轉換設定；settings.example.json 為內附預設與範例。
+/settings.json
+
 # ❌ 忽略 SQLite 資料庫（含 WAL 模式產生的 -wal / -shm 檔）
 data/*.db
 data/*.db-*
