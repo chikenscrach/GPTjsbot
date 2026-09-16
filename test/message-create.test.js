@@ -112,6 +112,32 @@ test('records converted notices without suppressing the original preview', async
   assertOwned(sent[0], message);
 });
 
+test('a Threads share without readable content sends a notice with the original post button', async t => {
+  const shareUrl = 'https://www.threads.com/share/BAUdmhsNSI/';
+  const canonicalUrl = 'https://www.threads.com/@restricted.user/post/RestrictedPost';
+  const fetched = [];
+  t.mock.method(global, 'fetch', async (url, options) => {
+    fetched.push(String(url));
+    assert.equal(options.redirect, 'manual');
+    if (url === shareUrl) return new Response(null, { status: 302, headers: { location: `${canonicalUrl}?xmt=tracking` } });
+    assert.equal(url, `${canonicalUrl}?xmt=tracking`);
+    return new Response('<html><title>Threads</title><body>Log in to continue</body></html>');
+  });
+  const { message, sent } = source(shareUrl);
+  const suppress = t.mock.method(message, 'suppressEmbeds', async () => {});
+  await event.execute(message);
+
+  assert.deepEqual(fetched, [shareUrl, `${canonicalUrl}?xmt=tracking`]);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].payload.content, /需要登入 Threads/);
+  assert.equal(sent[0].payload.embeds, undefined);
+  assert.equal(sent[0].payload.files, undefined);
+  assert.equal(sent[0].payload.components[0].components[0].label, '開啟原文');
+  assert.equal(sent[0].payload.components[0].components[0].url, canonicalUrl);
+  assert.equal(suppress.mock.callCount(), 0);
+  assertOwned(sent[0], message);
+});
+
 test('records the successful attachment-free fallback, not failed sends', async t => {
   t.mock.method(facebook, 'resolve', async () => media(['file']));
   t.mock.method(console, 'warn', () => {});

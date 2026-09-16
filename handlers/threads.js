@@ -18,7 +18,7 @@
 //
 // 回傳格式：
 //   { type:'embed', embed, embeds?, files, components?, originalUrl, additionalMessages? }
-//   { type:'notice', message, components? }（貼文需登入 / 已刪除等提示）
+//   { type:'notice', message, components? }（貼文需登入 / 已刪除 / 無可用內容等提示）
 
 const { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
@@ -327,6 +327,16 @@ function findPostObject(chunks, shortcode, expectedUsername) {
     };
 }
 
+function postNotice(message, originalUrl) {
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel('開啟原文')
+            .setURL(originalUrl)
+    );
+    return { type: 'notice', message, components: [row.toJSON()] };
+}
+
 // 區分「私人帳號需登入」與「貼文已刪除」：
 // 私人帳號的個人頁（threads.com/@username）會被 302 到 /login，公開帳號則正常載入。
 // 回傳 'login' | 'public' | 'unknown'
@@ -570,16 +580,10 @@ module.exports = {
             if (access === 'public' && !resolvedSharePost) {
                 return { type: 'notice', message: '網址錯誤或脆文已刪除' };
             }
-            const noticeRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setStyle(ButtonStyle.Link)
-                    .setLabel('開啟原文')
-                    .setURL(`https://www.threads.com/@${usernameFromUrl}/post/${postCode}`)
-            );
             const message = access === 'login' || resolvedSharePost
                 ? '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）'
                 : '🔒 無法檢視此貼文：可能需要登入 Threads，或貼文已刪除';
-            return { type: 'notice', message, components: [noticeRow.toJSON()] };
+            return postNotice(message, `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`);
         }
         const cleanUrl = `https://www.threads.com/@${usernameFromUrl}/post/${postCode}`;
 
@@ -661,6 +665,7 @@ module.exports = {
                 || quoteCodes.size > 1 || quoteUsers.size > 1;
             const qCaptionSource = trustedQuoteCandidates.find(candidate =>
                 candidate.caption && typeof candidate.caption.text === 'string'
+                    && candidate.caption.text.trim()
             );
             const qUserSource = trustedQuoteCandidates.find(candidate => {
                 const user = candidate.user || candidate.owner;
@@ -705,20 +710,25 @@ module.exports = {
             return true;
         });
 
-        // caption
-        let caption = '';
-        const captionSource = postObjects.find(obj =>
-            obj.caption && typeof obj.caption.text === 'string'
-        );
-        if (captionSource) {
-            caption = captionSource.caption.text;
-        } else {
-            caption = ogDesc;
-        }
+        // 同一貼文的空白 placeholder 不應蓋掉另一份完整文字。
+        // 若所有 exact-code caption 都為空，保留其空值，不以 OG 預覽文案取代。
+        const captions = postObjects.map(obj => obj.caption && obj.caption.text)
+            .filter(text => typeof text === 'string');
+        let caption = captions.find(text => text.trim()) ?? captions[0] ?? ogDesc;
         if (caption.length > 1900) caption = caption.slice(0, 1900) + '…';
 
         const poll = postObjects.map(extractPoll).find(Boolean) || null;
         const pollField = formatPollField(poll);
+
+        // 需登入的頁面也可能回 HTTP 200，而沒有 invalid_post redirect。
+        // 作者、頭像或正確的網址不代表已取得內容；解析不出內容時回提示，避免空白 embed。
+        // 在媒體、引用與投票都解析完後再判斷，保留沒有 caption 的正常貼文。
+        if (!caption.trim() && media.length === 0 && !quoted && !pollField) {
+            return postNotice(
+                '🔒 無法取得此貼文內容，可能需要登入 Threads 才能檢視。請點「開啟原文」查看。',
+                cleanUrl
+            );
+        }
 
         // embed
         // 貼文類型 → 對應顏色（影片項目會同時帶封面圖，判斷以 video 優先）

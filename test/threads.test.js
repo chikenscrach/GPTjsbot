@@ -8,6 +8,7 @@ const threads = require('../handlers/threads');
 const INVALID_POST_URL = 'https://www.threads.com/?error=invalid_post';
 const LOCK_NOTICE = '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）';
 const DELETED_NOTICE = '網址錯誤或脆文已刪除';
+const UNAVAILABLE_NOTICE = '🔒 無法取得此貼文內容，可能需要登入 Threads 才能檢視。請點「開啟原文」查看。';
 
 function makeResponse({ status = 200, location = null, html = '', bodyChunks = null } = {}) {
     const chunks = bodyChunks && bodyChunks.map(chunk => Buffer.from(chunk));
@@ -105,6 +106,62 @@ function assertEmbedResult(result, {
     assert.equal(originalButton.label, '開啟原文');
     assert.equal(originalButton.style, 5);
     assert.equal(originalButton.url, canonicalUrl);
+}
+
+function assertUnavailableNotice(result, canonicalUrl) {
+    assert.equal(result.type, 'notice');
+    assert.equal(result.message, UNAVAILABLE_NOTICE);
+    assert.equal(result.embed, undefined);
+    assert.equal(result.embeds, undefined);
+    assert.equal(result.files, undefined);
+    assert.equal(result.additionalMessages, undefined);
+    const button = result.components[0].components[0];
+    assert.equal(button.label, '開啟原文');
+    assert.equal(button.style, 5);
+    assert.equal(button.url, canonicalUrl);
+}
+
+// Synthetic HTTP 200 responses: login-gated pages need not redirect to invalid_post.
+for (const [label, page] of [
+    ['empty HTML', () => ''],
+    ['login page with unrelated recommendations', () => postHtml({
+        username: 'other.user',
+        pageUrl: 'https://www.threads.com/',
+        ogDescription: 'Log in to see more from Threads',
+        ogImage: 'https://cdn.example.test/login-logo.jpg',
+        chunks: [{ code: 'OtherPost', caption: { text: 'Unrelated recommendation' } }],
+    })],
+    ['author-only metadata', canonicalUrl => postHtml({
+        username: 'restricted.user',
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        ogImage: 'https://cdn.example.test/avatar.jpg',
+    })],
+    ['empty target and quote placeholders', canonicalUrl => postHtml({
+        username: 'restricted.user',
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        chunks: [{
+            code: 'RestrictedPost',
+            caption: { text: ' \n\t ' },
+            text_post_app_info: {
+                share_info: { quoted_post: { code: 'HiddenQuote', caption: { text: ' \n ' } } },
+            },
+        }],
+    })],
+]) {
+    test(`resolved share with ${label} returns a notice instead of an empty embed`, async () => {
+        const shareUrl = 'https://www.threads.com/share/BAUdmhsNSI/';
+        const canonicalUrl = 'https://www.threads.com/@restricted.user/post/RestrictedPost';
+        const redirectedUrl = `${canonicalUrl}?xmt=tracking`;
+        const result = await withFetchScript([
+            { url: shareUrl, status: 302, location: redirectedUrl },
+            { url: redirectedUrl, html: page(canonicalUrl) },
+        ], () => threads.resolve(shareUrl));
+
+        assertUnavailableNotice(result, canonicalUrl);
+        assert.equal(JSON.stringify(result).includes('Unrelated recommendation'), false);
+    });
 }
 
 test('resolved share link keeps the login notice when a public profile leads to invalid_post', async () => {
@@ -397,11 +454,7 @@ test('OG metadata without a post identity URL fails closed', async () => {
         { url: canonicalUrl, html },
     ], () => threads.resolve(canonicalUrl));
 
-    assertEmbedResult(result, {
-        canonicalUrl,
-        description: undefined,
-    });
-    assert.equal(result.embed.thumbnail, undefined);
+    assertUnavailableNotice(result, canonicalUrl);
     assert.equal(JSON.stringify(result).includes('Unverified same-author'), false);
     assert.equal(JSON.stringify(result).includes('unrelated-sjs-image.jpg'), false);
 });
@@ -478,6 +531,57 @@ test('ordinary target text post does not turn the OG image into post media', asy
         description: 'Ordinary text caption',
     });
     assert.equal(result.embed.thumbnail.url, ogImage);
+});
+
+for (const [label, content] of [
+    ['image', imageMedia('https://cdn.example.test/no-caption.jpg')],
+    ['video', { video_versions: [{ url: 'https://cdn.example.test/no-caption.mp4', width: 1280 }] }],
+    ['quoted text', {
+        text_post_app_info: { share_info: { quoted_post: {
+            code: 'QuotedOnly', user: { username: 'quoted.user' }, caption: { text: 'Quoted text' },
+        } } },
+    }],
+    ['quoted image', {
+        text_post_app_info: { share_info: { quoted_post: {
+            code: 'QuotedOnly', user: { username: 'quoted.user' },
+            ...imageMedia('https://cdn.example.test/quoted-only.jpg'),
+        } } },
+    }],
+    ['poll', { caption_add_on: { poll: { tallies: [{ text: 'Yes', count: 2 }, { text: 'No', count: 0 }] } } }],
+]) {
+    test(`a captionless post containing ${label} still produces its content`, async () => {
+        const canonicalUrl = 'https://www.threads.com/@target.user/post/ContentOnly';
+        const steps = [{ url: canonicalUrl, html: postHtml({
+            pageUrl: canonicalUrl,
+            ogDescription: null,
+            chunks: [{ code: 'ContentOnly', caption: { text: '' }, ...content }],
+        }) }];
+        if (label === 'video') {
+            steps.push({ url: content.video_versions[0].url, manual: false, bodyChunks: ['video'] });
+        }
+        const result = await withFetchScript(steps, () => threads.resolve(canonicalUrl));
+        assert.equal(result.type, 'embed');
+        assert.equal(result.embed.description, undefined);
+        assert.equal(result.components[0].components[0].url, canonicalUrl);
+        if (label === 'image') assert.equal(result.embed.image.url, 'https://cdn.example.test/no-caption.jpg');
+        if (label === 'video') assert.equal(result.files[0].name, 'ContentOnly_0.mp4');
+        if (label === 'quoted image') assert.equal(result.embed.image.url, 'https://cdn.example.test/quoted-only.jpg');
+        if (label === 'quoted text') assert.equal(result.embed.fields[0].value, 'Quoted text');
+        if (label === 'poll') assert.match(result.embed.fields[0].value, /Yes[\s\S]*No/);
+    });
+}
+
+test('an empty duplicate caption cannot hide readable text in another exact target object', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/DuplicateCaption';
+    const result = await withFetchScript([{ url: canonicalUrl, html: postHtml({
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        chunks: [
+            { code: 'DuplicateCaption', caption: { text: ' \n ' }, user: { username: 'target.user' } },
+            { code: 'DuplicateCaption', caption: { text: 'Readable caption' } },
+        ],
+    }) }], () => threads.resolve(canonicalUrl));
+    assertEmbedResult(result, { canonicalUrl, description: 'Readable caption' });
 });
 
 test('ordinary target quote keeps outer text, quoted media, and both link buttons', async () => {
@@ -639,12 +743,7 @@ test('conflicting exact shortcode duplicates fail closed without candidate post 
         { url: canonicalUrl, html },
     ], () => threads.resolve(canonicalUrl));
 
-    assertEmbedResult(result, {
-        canonicalUrl,
-        description: undefined,
-    });
-    assert.equal(result.embed.thumbnail, undefined);
-    assert.equal(result.embeds.length, 1);
+    assertUnavailableNotice(result, canonicalUrl);
     const serialized = JSON.stringify(result);
     assert.equal(serialized.includes('Conflicting candidate'), false);
     assert.equal(serialized.includes('conflicting-a.jpg'), false);
@@ -671,12 +770,7 @@ test('mismatched OG URL cannot supply description or image when target data is a
         { url: canonicalUrl, html },
     ], () => threads.resolve(canonicalUrl));
 
-    assertEmbedResult(result, {
-        canonicalUrl,
-        description: undefined,
-    });
-    assert.equal(result.embed.thumbnail, undefined);
-    assert.equal(result.embeds.length, 1);
+    assertUnavailableNotice(result, canonicalUrl);
     const serialized = JSON.stringify(result);
     assert.equal(serialized.includes('Wrong OG description'), false);
     assert.equal(serialized.includes('wrong-og-image.jpg'), false);
