@@ -16,6 +16,12 @@ GPTjsbot 可把常見平台網址轉成更適合 Discord 預覽的網址，或�
 | Facebook | 專用 Handler 解析並使用替代預覽 |
 | YouTube | 專用 Handler 標準化短網址 |
 
+### Facebook 影片網址
+
+`/{發布者}/videos/{標題}/{影片ID}`、`/{發布者}/videos/{影片ID}` 與 `/watch/?v={影片ID}` 會統一轉成 `https://facebed.com/watch/?v={影片ID}`，移除標題與追蹤參數。
+
+`/share/v/...`、`fb.watch` 分享連結會先追蹤重新導向，再從頁面 metadata、最終網址或登入頁的 `next` 參數辨識影片 ID；辨識成功後，不必再請求貼文外嵌頁。
+
 ## 簡單規則：`settings.json`
 
 建立自己的設定：
