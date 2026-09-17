@@ -39,6 +39,24 @@ const isPhotoUrl = (value) => {
 	}
 };
 
+// 影片 ID 已足夠定位影片；移除標題、發布者路徑與追蹤參數。
+const normalizeVideoUrl = (value) => {
+	if (!value) return null;
+	try {
+		const parsed = new URL(value, 'https://www.facebook.com');
+		if (!/^https?:$/.test(parsed.protocol) || !/(^|\.)(?:facebook|fb)\.com$/i.test(parsed.hostname)) return null;
+
+		const pathId = parsed.pathname.match(/^\/[^/]+\/videos\/(?:[^/]+\/)?(\d+)\/?$/i)?.[1];
+		const watchId = /^\/watch\/?$/i.test(parsed.pathname) ? parsed.searchParams.get('v') : null;
+		const videoId = pathId || watchId;
+		return videoId && /^\d+$/.test(videoId)
+			? `https://www.facebook.com/watch/?v=${videoId}`
+			: null;
+	} catch {
+		return null;
+	}
+};
+
 module.exports = {
 	name: 'facebook',
 
@@ -83,9 +101,12 @@ module.exports = {
 			// 清空它以強制走 fallback，從外嵌頁取得真正的母貼文。
 			if (canonicalUrl && isPhotoUrl(canonicalUrl)) canonicalUrl = null;
 
-			let resultUrl = null;
+			// 優先使用影片 metadata，再檢查重新導向（含 login next）及原始網址。
+			let resultUrl = normalizeVideoUrl(canonicalUrl)
+				|| normalizeVideoUrl(cleanUrl)
+				|| normalizeVideoUrl(url);
 
-			if (canonicalUrl) {
+			if (!resultUrl && canonicalUrl) {
 				// ---- 有 canonical：一般貼文（粉專 / 群組）----
 				const idMatch = canonicalUrl.match(/\/(?:posts|permalink|videos)\/(?:[^/]*\/)?(\d{6,})\/?$/)
 					|| canonicalUrl.match(/\/(?:posts|permalink|videos)\/(\d{6,})/);
@@ -103,7 +124,7 @@ module.exports = {
 						resultUrl = canonicalUrl;
 					}
 				}
-			} else {
+			} else if (!resultUrl) {
 				// ---- Fallback：無 canonical（被 login 擋住，如 photo、story.php、pfbid 等）----
 				const fbid = urlObj.searchParams.get('fbid');
 				const setParam = urlObj.searchParams.get('set');
