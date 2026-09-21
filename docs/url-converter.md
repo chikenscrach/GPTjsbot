@@ -16,6 +16,14 @@ GPTjsbot 可把常見平台網址轉成更適合 Discord 預覽的網址，或�
 | Facebook | 專用 Handler 解析並使用替代預覽 |
 | YouTube | 專用 Handler 標準化短網址 |
 
+### Threads 互動次數
+
+Threads 預覽會在 embed 底部依序顯示愛心、留言、轉發與分享次數，例如：
+
+`Threads • ❤️ 1,234 • 💬 56 • 🔁 7 • ✈️ 8`
+
+轉發次數包含一般轉發與引用轉發，與 Threads 頁面的按鈕一致。數字是產生預覽時取得的資料，不會自動更新；頁面未提供的項目顯示 `—`，實際為零則顯示 `0`。媒體過大或下載失敗的提示仍會保留在底部。
+
 ### Facebook 影片網址
 
 `/{發布者}/videos/{標題}/{影片ID}`、`/{發布者}/videos/{影片ID}` 與 `/watch/?v={影片ID}` 會統一轉成 `https://facebed.com/watch/?v={影片ID}`，移除標題與追蹤參數。

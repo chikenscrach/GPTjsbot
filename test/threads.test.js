@@ -10,7 +10,13 @@ const LOCK_NOTICE = '🔒 此貼文需要登入 Threads 才能檢視（私人帳
 const DELETED_NOTICE = '網址錯誤或脆文已刪除';
 const UNAVAILABLE_NOTICE = '🔒 無法取得此貼文內容，可能需要登入 Threads 才能檢視。請點「開啟原文」查看。';
 
-function makeResponse({ status = 200, location = null, html = '', bodyChunks = null } = {}) {
+function makeResponse({
+    status = 200,
+    location = null,
+    html = '',
+    bodyChunks = null,
+    declaredContentLength = null,
+} = {}) {
     const chunks = bodyChunks && bodyChunks.map(chunk => Buffer.from(chunk));
     return {
         status,
@@ -19,6 +25,9 @@ function makeResponse({ status = 200, location = null, html = '', bodyChunks = n
             get(name) {
                 const key = name.toLowerCase();
                 if (key === 'location') return location;
+                if (key === 'content-length' && declaredContentLength != null) {
+                    return String(declaredContentLength);
+                }
                 if (key === 'content-length' && chunks) {
                     return String(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
                 }
@@ -106,6 +115,10 @@ function assertEmbedResult(result, {
     assert.equal(originalButton.label, '開啟原文');
     assert.equal(originalButton.style, 5);
     assert.equal(originalButton.url, canonicalUrl);
+}
+
+function assertEmbedFooter(result, text) {
+    assert.equal(result.embed.footer?.text, text);
 }
 
 function assertUnavailableNotice(result, canonicalUrl) {
@@ -776,4 +789,280 @@ test('mismatched OG URL cannot supply description or image when target data is a
     assert.equal(serialized.includes('wrong-og-image.jpg'), false);
     assert.equal(serialized.includes('Wrong SJS caption'), false);
     assert.equal(serialized.includes('wrong-sjs-image.jpg'), false);
+});
+
+test('Threads footer formats all interaction counts in the documented order', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/EngagementTarget';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'EngagementTarget',
+            user: { username: 'target.user' },
+            caption: { text: 'Engagement target caption' },
+            like_count: '18141',
+            text_post_app_info: {
+                direct_reply_count: 4738,
+                repost_count: 585,
+                quote_count: 250,
+                reshare_count: '496',
+            },
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: 'Engagement target caption',
+    });
+    assertEmbedFooter(result, 'Threads • ❤️ 18,141 • 💬 4,738 • 🔁 835 • ✈️ 496');
+});
+
+for (const {
+    label,
+    code,
+    likeCount,
+    directReplyCount,
+    repostCount,
+    quoteCount,
+    reshareCount,
+    footer,
+} of [
+    {
+        label: 'invalid values',
+        code: 'InvalidEngagement',
+        likeCount: null,
+        directReplyCount: -1,
+        repostCount: 1.5,
+        quoteCount: true,
+        reshareCount: '4.2',
+        footer: 'Threads • ❤️ — • 💬 — • 🔁 — • ✈️ —',
+    },
+    {
+        label: 'zero values',
+        code: 'ZeroEngagement',
+        likeCount: 0,
+        directReplyCount: 0,
+        repostCount: 0,
+        quoteCount: 0,
+        reshareCount: 0,
+        footer: 'Threads • ❤️ 0 • 💬 0 • 🔁 0 • ✈️ 0',
+    },
+    {
+        label: 'missing quote repost count',
+        code: 'MissingQuoteEngagement',
+        likeCount: 1,
+        directReplyCount: 2,
+        repostCount: 3,
+        reshareCount: 4,
+        footer: 'Threads • ❤️ 1 • 💬 2 • 🔁 — • ✈️ 4',
+    },
+    {
+        label: 'repost sum overflow',
+        code: 'OverflowEngagement',
+        likeCount: 0,
+        directReplyCount: 0,
+        repostCount: Number.MAX_SAFE_INTEGER,
+        quoteCount: 1,
+        reshareCount: 0,
+        footer: 'Threads • ❤️ 0 • 💬 0 • 🔁 — • ✈️ 0',
+    },
+]) {
+    test(`interaction footer handles ${label}`, async () => {
+        const canonicalUrl = `https://www.threads.com/@target.user/post/${code}`;
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            chunks: [{
+                code,
+                user: { username: 'target.user' },
+                caption: { text: `${label} engagement caption` },
+                like_count: likeCount,
+                text_post_app_info: {
+                    direct_reply_count: directReplyCount,
+                    repost_count: repostCount,
+                    ...(quoteCount === undefined ? {} : { quote_count: quoteCount }),
+                    reshare_count: reshareCount,
+                },
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        assertEmbedResult(result, {
+            canonicalUrl,
+            description: `${label} engagement caption`,
+        });
+        assertEmbedFooter(result, footer);
+    });
+}
+
+test('interaction counts stay isolated from quoted, replied, and recommended posts', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/IsolatedEngagement';
+    const unrelatedStats = {
+        like_count: 999,
+        text_post_app_info: {
+            direct_reply_count: 888,
+            repost_count: 777,
+            quote_count: 666,
+            reshare_count: 555,
+        },
+    };
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'IsolatedEngagement',
+            user: { username: 'target.user' },
+            caption: { text: 'Isolated engagement caption' },
+            text_post_app_info: {
+                share_info: {
+                    quoted_post: {
+                        code: 'QuotedEngagement',
+                        user: { username: 'quoted.user' },
+                        caption: { text: 'Quoted content' },
+                        ...unrelatedStats,
+                    },
+                },
+            },
+            replies: [{
+                code: 'ReplyEngagement',
+                user: { username: 'reply.user' },
+                ...unrelatedStats,
+            }],
+            recommendations: [{
+                code: 'RecommendedEngagement',
+                user: { username: 'recommended.user' },
+                ...unrelatedStats,
+            }],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: 'Isolated engagement caption',
+    });
+    assertEmbedFooter(result, 'Threads • ❤️ — • 💬 — • 🔁 — • ✈️ —');
+});
+
+test('compatible target duplicates fill interaction counts column by column', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/DuplicateEngagement';
+    const identity = {
+        id: 'engagement-post-id',
+        pk: 'engagement-post-pk',
+        code: 'DuplicateEngagement',
+        user: { username: 'target.user' },
+    };
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [
+            {
+                ...identity,
+                caption: { text: 'Duplicate engagement caption' },
+                like_count: 18141,
+                text_post_app_info: { direct_reply_count: 4738 },
+            },
+            {
+                ...identity,
+                text_post_app_info: {
+                    repost_count: 585,
+                    quote_count: 250,
+                    reshare_count: 496,
+                },
+            },
+        ],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: 'Duplicate engagement caption',
+    });
+    assertEmbedFooter(result, 'Threads • ❤️ 18,141 • 💬 4,738 • 🔁 835 • ✈️ 496');
+});
+
+test('failed media download keeps the engagement footer and appends its warning', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/FailedEngagementMedia';
+    const videoUrl = 'https://cdn.example.test/failed-engagement.mp4';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'FailedEngagementMedia',
+            user: { username: 'target.user' },
+            caption: { text: 'Failed media caption' },
+            like_count: 18141,
+            video_versions: [{ url: videoUrl, width: 1280 }],
+            text_post_app_info: {
+                direct_reply_count: 4738,
+                repost_count: 585,
+                quote_count: 250,
+                reshare_count: 496,
+            },
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        { url: videoUrl, status: 503, manual: false },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: 'Failed media caption',
+    });
+    assertEmbedFooter(
+        result,
+        'Threads • ❤️ 18,141 • 💬 4,738 • 🔁 835 • ✈️ 496 • 1 個媒體下載失敗',
+    );
+});
+
+test('oversized media keeps the engagement footer and appends its warning', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/OversizedEngagementMedia';
+    const imageUrls = Array.from({ length: 5 }, (_, index) =>
+        `https://cdn.example.test/oversized-engagement-${index}.jpg`
+    );
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'OversizedEngagementMedia',
+            user: { username: 'target.user' },
+            caption: { text: 'Oversized media caption' },
+            carousel_media: imageUrls.map(url => imageMedia(url)),
+            like_count: 18141,
+            text_post_app_info: {
+                direct_reply_count: 4738,
+                repost_count: 585,
+                quote_count: 250,
+                reshare_count: 496,
+            },
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        {
+            url: imageUrls[4],
+            manual: false,
+            declaredContentLength: 10 * 1024 * 1024 + 1,
+        },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: 'Oversized media caption',
+        imageUrl: imageUrls[0],
+    });
+    assertEmbedFooter(
+        result,
+        'Threads • ❤️ 18,141 • 💬 4,738 • 🔁 835 • ✈️ 496 • 1 個媒體超過 10MB 未附上',
+    );
 });

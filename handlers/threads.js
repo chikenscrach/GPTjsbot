@@ -433,6 +433,35 @@ function findProfilePic(obj) {
         : null;
 }
 
+function normalizeEngagementCount(value) {
+    // 缺漏值不可轉成 0；僅接受非負整數與純數字字串。
+    if (typeof value === 'string' && /^\d+$/.test(value)) value = Number(value);
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function formatEngagementStats(objects) {
+    // 僅讀取已驗證的主文物件，不遞迴讀取引用、留言或推薦內容。
+    // 同一貼文可能有多份 SSR 物件，逐欄補足資料；0 是有效數字。
+    const readCount = selectValue => {
+        for (const obj of objects) {
+            const count = normalizeEngagementCount(selectValue(obj));
+            if (count !== null) return count;
+        }
+        return null;
+    };
+    const reposts = readCount(obj => obj.text_post_app_info?.repost_count);
+    const quotes = readCount(obj => obj.text_post_app_info?.quote_count);
+    // Threads 的轉發按鈕顯示一般轉發 + 引用轉發，紙飛機分享另用 reshare_count。
+    const totalReposts = reposts !== null && quotes !== null
+        ? normalizeEngagementCount(reposts + quotes) : null;
+    return [
+        ['❤️', readCount(obj => obj.like_count)],
+        ['💬', readCount(obj => obj.text_post_app_info?.direct_reply_count)],
+        ['🔁', totalReposts],
+        ['✈️', readCount(obj => obj.text_post_app_info?.reshare_count)],
+    ].map(([emoji, count]) => `${emoji} ${count === null ? '—' : count.toLocaleString('en-US')}`);
+}
+
 function extractPoll(obj) {
     const poll = obj && obj.caption_add_on && obj.caption_add_on.poll;
     if (!poll || !Array.isArray(poll.tallies) || poll.tallies.length === 0) return null;
@@ -798,9 +827,9 @@ module.exports = {
         }
         const files = attachments.filter(Boolean);
 
-        // 超過大小上限而未附上的媒體，在 footer 提示
+        // 互動統計與未附上的媒體提示共用 footer，保留 Threads 標記供刪除指令辨識。
         const sizeMB = Math.floor(MAX_FILE_SIZE / 1024 / 1024);
-        const footerParts = ['Threads'];
+        const footerParts = ['Threads', ...formatEngagementStats(postObjects)];
         if (skippedBig > 0) footerParts.push(`${skippedBig} 個媒體超過 ${sizeMB}MB 未附上`);
         if (failedDownload > 0) footerParts.push(`${failedDownload} 個媒體下載失敗`);
         embed.setFooter({ text: footerParts.join(' • ') });
