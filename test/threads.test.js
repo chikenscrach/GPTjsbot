@@ -584,6 +584,261 @@ for (const [label, content] of [
     });
 }
 
+test('a finished poll with unavailable tallies keeps a result field after a username redirect', async () => {
+    const initialUrl = 'https://threads.com/@old.user/post/LivePoll';
+    const redirectedUrl = 'https://www.threads.com/@new.user/post/LivePoll?xmt=tracking';
+    const canonicalUrl = 'https://www.threads.com/@new.user/post/LivePoll';
+    const html = postHtml({
+        username: 'new.user',
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'LivePoll',
+            user: { username: 'new.user' },
+            caption: { text: '最好用的杯子是哪個' },
+            caption_add_on: {
+                poll: {
+                    __typename: 'XDTPollSticker',
+                    expires_at: null,
+                    finished: true,
+                    tallies: null,
+                    viewer_can_vote: false,
+                    poll_id: '17938639059071786',
+                    id: 'polling_sticker_vibrant',
+                },
+            },
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: initialUrl.replace('https://threads.com', 'https://www.threads.com'), status: 302, location: redirectedUrl },
+        { url: redirectedUrl, html },
+    ], () => threads.resolve(initialUrl));
+
+    assert.equal(result.type, 'embed');
+    const pollField = result.embed.fields?.find(field => field.name === '📊 投票結果');
+    assert.ok(pollField);
+    assert.match(pollField.value, /投票結果暫時無法取得|尚未提供|無法取得/);
+    assert.doesNotMatch(pollField.value, /0 票|0\.0%/);
+    assert.match(pollField.value, /已結束/);
+    assert.equal(result.components[0].components[0].url, canonicalUrl);
+    assert.equal(result.originalUrl, canonicalUrl);
+});
+
+test('compatible exact poll duplicates prefer complete tallies and ignore other-post and quoted polls', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/PollDuplicate';
+    const identity = {
+        id: 'poll-duplicate-id',
+        pk: 'poll-duplicate-pk',
+        code: 'PollDuplicate',
+        user: { username: 'target.user' },
+    };
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [
+            {
+                ...identity,
+                caption: { text: 'Duplicate poll caption' },
+                caption_add_on: {
+                    poll: {
+                        finished: true,
+                        tallies: null,
+                        viewer_can_vote: false,
+                    },
+                },
+                text_post_app_info: {
+                    share_info: {
+                        quoted_post: {
+                            code: 'QuotedPoll',
+                            user: { username: 'quoted.user' },
+                            caption_add_on: {
+                                poll: {
+                                    finished: true,
+                                    tallies: [{ text: 'Quoted leak', count: 99 }],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                ...identity,
+                caption_add_on: {
+                    poll: {
+                        finished: true,
+                        tallies: [{ text: 'Partial stale option' }],
+                        viewer_can_vote: false,
+                    },
+                },
+            },
+            {
+                ...identity,
+                caption_add_on: {
+                    poll: {
+                        finished: true,
+                        tallies: [
+                            { text: 'Yes', count: 2 },
+                            { text: 'No', count: 0 },
+                        ],
+                        viewer_can_vote: false,
+                    },
+                },
+            },
+            {
+                code: 'OtherPost',
+                caption_add_on: {
+                    poll: {
+                        finished: true,
+                        tallies: [{ text: 'Other post leak', count: 77 }],
+                    },
+                },
+            },
+        ],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(result.type, 'embed');
+    const pollField = result.embed.fields?.find(field => field.name === '📊 投票結果');
+    assert.ok(pollField);
+    assert.match(pollField.value, /Yes[\s\S]*No/);
+    assert.doesNotMatch(pollField.value, /Partial stale option|Quoted leak|Other post leak/);
+    assert.doesNotMatch(pollField.value, /投票結果暫時無法取得|尚未提供|無法取得/);
+});
+
+test('complete poll results preserve finished metadata, percentages, and genuine zero counts', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/CompletePoll';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'CompletePoll',
+            user: { username: 'target.user' },
+            caption: { text: 'Complete poll caption' },
+            caption_add_on: {
+                poll: {
+                    finished: true,
+                    expires_at: null,
+                    viewer_can_vote: false,
+                    tallies: [
+                        { text: 'A', count: 2 },
+                        { text: 'B', count: '1' },
+                        { text: 'Zero', count: 0 },
+                    ],
+                },
+            },
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    const pollField = result.embed.fields?.find(field => field.name === '📊 投票結果');
+    assert.ok(pollField);
+    assert.match(pollField.value, /A[\s\S]*66\.7%[\s\S]*2 票/);
+    assert.match(pollField.value, /B[\s\S]*33\.3%[\s\S]*1 票/);
+    assert.match(pollField.value, /Zero[\s\S]*0\.0%[\s\S]*0 票/);
+    assert.match(pollField.value, /共 \*\*3\*\* 票/);
+    assert.match(pollField.value, /已結束/);
+    assert.doesNotMatch(pollField.value, /投票結果暫時無法取得|尚未提供|無法取得/);
+});
+
+for (const [label, tallies] of [['null', null], ['empty', []], ['missing', undefined]]) {
+    test(`a captionless poll with ${label} tallies remains visible`, async () => {
+        const canonicalUrl = 'https://www.threads.com/@target.user/post/UnavailablePollOnly';
+        const result = await withFetchScript([{ url: canonicalUrl, html: postHtml({
+            pageUrl: canonicalUrl,
+            ogDescription: null,
+            chunks: [{
+                code: 'UnavailablePollOnly',
+                caption: { text: '' },
+                caption_add_on: { poll: {
+                    __typename: 'XDTPollSticker',
+                    finished: false,
+                    expires_at: '1800000000',
+                    tallies,
+                } },
+            }],
+        }) }], () => threads.resolve(canonicalUrl));
+
+        assert.equal(result.type, 'embed');
+        assert.equal(result.embed.description, undefined);
+        assert.equal(result.embed.color, 0xFEE75C);
+        const field = result.embed.fields[0];
+        assert.equal(field.name, '📊 投票');
+        assert.match(field.value, /投票結果暫時無法取得/);
+        assert.match(field.value, /<t:1800000000:R>/);
+        assert.doesNotMatch(field.value, /0 票|0\.0%/);
+    });
+}
+
+for (const [label, badCount] of [
+    ['missing', undefined],
+    ['null', null],
+    ['empty string', ''],
+    ['boolean false', false],
+    ['negative', -1],
+    ['non-numeric string', 'NaN'],
+    ['fractional', 1.5],
+]) {
+    test(`poll ${label} count never renders as zero results`, async () => {
+        const code = `InvalidPollCount_${label.replace(/[^A-Za-z0-9]/g, '')}`;
+        const canonicalUrl = `https://www.threads.com/@target.user/post/${code}`;
+        const tally = { text: 'Bad count' };
+        if (badCount !== undefined) tally.count = badCount;
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            chunks: [{
+                code,
+                user: { username: 'target.user' },
+                caption: { text: 'Invalid poll count caption' },
+                caption_add_on: {
+                    poll: {
+                        finished: true,
+                        tallies: [tally],
+                    },
+                },
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        const pollField = result.embed.fields?.find(field => field.name === '📊 投票結果');
+        assert.ok(pollField);
+        assert.match(pollField.value, /投票結果暫時無法取得|尚未提供|無法取得/);
+        assert.doesNotMatch(pollField.value, /0 票|0\.0%/);
+    });
+}
+
+for (const [label, captionAddOn] of [
+    ['an empty poll object', { poll: {} }],
+    ['no poll object', undefined],
+]) {
+    test(`${label} does not create a poll field`, async () => {
+        const canonicalUrl = `https://www.threads.com/@target.user/post/${label === 'an empty poll object' ? 'EmptyPoll' : 'NoPoll'}`;
+        const content = {
+            code: label === 'an empty poll object' ? 'EmptyPoll' : 'NoPoll',
+            user: { username: 'target.user' },
+            caption: { text: 'Ordinary text caption' },
+        };
+        if (captionAddOn !== undefined) content.caption_add_on = captionAddOn;
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            chunks: [content],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        assert.equal(result.type, 'embed');
+        assert.equal(result.embed.fields, undefined);
+    });
+}
+
 test('an empty duplicate caption cannot hide readable text in another exact target object', async () => {
     const canonicalUrl = 'https://www.threads.com/@target.user/post/DuplicateCaption';
     const result = await withFetchScript([{ url: canonicalUrl, html: postHtml({

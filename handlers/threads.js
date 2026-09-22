@@ -464,19 +464,38 @@ function formatEngagementStats(objects) {
 
 function extractPoll(obj) {
     const poll = obj && obj.caption_add_on && obj.caption_add_on.poll;
-    if (!poll || !Array.isArray(poll.tallies) || poll.tallies.length === 0) return null;
-    const tallies = poll.tallies
-        .filter(t => t && typeof t.text === 'string')
-        .map(t => ({ text: t.text, count: Number(t.count) || 0 }));
-    if (!tallies.length) return null;
+    if (!poll || typeof poll !== 'object' || Array.isArray(poll)) return null;
+    const rawTallies = Array.isArray(poll.tallies) ? poll.tallies : [];
+    // Threads may return an XDTPollSticker with tallies:null plus a GraphQL field
+    // error. That is an unavailable result, not an absent poll (or zero votes).
+    const isPoll = poll.__typename === 'XDTPollSticker'
+        || (typeof poll.poll_id === 'string' && poll.poll_id.length > 0)
+        || typeof poll.finished === 'boolean'
+        || rawTallies.length > 0;
+    if (!isPoll) return null;
+    const tallies = rawTallies
+        .filter(t => t && typeof t.text === 'string' && t.text.trim())
+        .map(t => ({ text: t.text, count: normalizeEngagementCount(t.count) }));
+    const completeTallies = tallies.length > 0 && tallies.length === rawTallies.length
+        && tallies.every(t => t.count !== null);
+    const total = completeTallies
+        ? normalizeEngagementCount(tallies.reduce((sum, t) => sum + t.count, 0)) : null;
     return {
         tallies,
-        total: tallies.reduce((sum, t) => sum + t.count, 0),
-        max: Math.max(...tallies.map(t => t.count), 0),
+        resultsAvailable: total !== null,
+        total,
+        max: total !== null ? Math.max(...tallies.map(t => t.count), 0) : null,
         finished: poll.finished === true,
-        expiresAt: Number.isFinite(Number(poll.expires_at)) ? Number(poll.expires_at) : null,
+        expiresAt: normalizeEngagementCount(poll.expires_at),
         viewerCanVote: poll.viewer_can_vote === true,
     };
+}
+
+function selectPoll(objects) {
+    // Use one complete snapshot from the verified post, never totals assembled
+    // from different copies or polls found in related/quoted posts.
+    const polls = objects.map(extractPoll).filter(Boolean);
+    return polls.find(poll => poll.resultsAvailable) || polls[0] || null;
 }
 
 function escapeEmbedText(s) {
@@ -490,6 +509,16 @@ function escapeEmbedText(s) {
 
 function formatPollField(poll) {
     if (!poll) return null;
+    if (!poll.resultsAvailable) {
+        const status = poll.finished ? '已結束'
+            : poll.expiresAt ? `結束時間 <t:${Math.floor(poll.expiresAt)}:R>`
+                : poll.viewerCanVote ? '仍可投票' : '';
+        return {
+            name: poll.finished ? '📊 投票結果' : '📊 投票',
+            value: '投票結果暫時無法取得，請點「開啟原文」查看。'
+                + (status ? `\n${status}` : ''),
+        };
+    }
     const barWidth = 12;
     const fmt = n => Number(n || 0).toLocaleString('en-US');
     const lines = poll.tallies.map((t, idx) => {
@@ -746,7 +775,7 @@ module.exports = {
         let caption = captions.find(text => text.trim()) ?? captions[0] ?? ogDesc;
         if (caption.length > 1900) caption = caption.slice(0, 1900) + '…';
 
-        const poll = postObjects.map(extractPoll).find(Boolean) || null;
+        const poll = selectPoll(postObjects);
         const pollField = formatPollField(poll);
 
         // 需登入的頁面也可能回 HTTP 200，而沒有 invalid_post redirect。
