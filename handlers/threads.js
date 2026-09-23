@@ -14,13 +14,18 @@
 //        text_post_app_info.share_info.quoted_attachment_post，一併抽出。
 //   3. 純圖片貼文：前 4 張用同 URL 多 embed 合併成單一 embed 的圖片網格（不需下載）；
 //      第 5 張起、以及所有影片與含影片貼文的圖片，下載後當附件上傳（影片原生播放）。
-//   4. 超過 10 個附件時分批經由 additionalMessages 回傳，由 messageCreate 逐條送出。
+//      超過上傳上限的影片改用 Media Gallery 直接引用 CDN，不下載整段影片。
+//   4. 超過 10 個附件時分批；CDN 影片另用 Components V2 訊息（不可與 embed 混用），
+//      皆經由 additionalMessages 回傳，由 messageCreate 逐條送出。
 //
 // 回傳格式：
 //   { type:'embed', embed, embeds?, files, components?, originalUrl, additionalMessages? }
 //   { type:'notice', message, components? }（貼文需登入 / 已刪除 / 無可用內容等提示）
 
-const { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const {
+    ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
+    MediaGalleryBuilder, MediaGalleryItemBuilder, MessageFlags, TextDisplayBuilder,
+} = require('discord.js');
 
 const FETCH_TIMEOUT = 20000;
 const FETCH_MEDIA_TIMEOUT = 25000;
@@ -38,6 +43,7 @@ const THREADS_COLORS = {
     poll:  0xFEE75C, // 投票貼文：黃
 };
 const MAX_ATTACH_PER_MSG = 10;
+const MAX_MEDIA_PER_GALLERY = 10;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // Discord 未加成伺服器的上限 10MB，超過立即中斷下載
 // 媒體平行下載數，可透過環境變數 THREADS_MAX_PARALLEL_MEDIA 調整
 const MAX_PARALLEL_MEDIA = Math.min(10, Math.max(1, parseInt(process.env.THREADS_MAX_PARALLEL_MEDIA, 10) || 6));
@@ -825,7 +831,7 @@ module.exports = {
 
         // 媒體呈現規則：
         // - 純圖片：前 4 張進 embed 圖片網格（不上傳），第 5 張起改用附件。
-        // - 只要含影片：embed 只放文字，影片與 standalone 圖片全部改用附件。
+        // - 只要含影片：embed 只放文字，影片與 standalone 圖片先嘗試附件；超大影片改用 CDN。
         // - 附件全數失敗時，退回把首張圖 / 影片封面放進 embed（見下方 fallback）。
         const attachments = [];
         const downloads = [];
@@ -842,13 +848,18 @@ module.exports = {
 
         let skippedBig = 0;
         let failedDownload = 0;
+        const cdnVideos = [];
         if (downloads.length) {
             const results = await limitParallel(
                 downloads.map(d => async () => ({ ...d, res: await fetchMedia(d.url, d.kind) })),
                 MAX_PARALLEL_MEDIA
             );
             for (const r of results) {
-                if (r.res && r.res.tooBig) { skippedBig++; attachments[r.idx] = null; continue; }
+                if (r.res && r.res.tooBig) {
+                    if (r.kind === 'video') cdnVideos.push(r);
+                    else skippedBig++;
+                    continue;
+                }
                 if (!r.res) { failedDownload++; attachments[r.idx] = null; continue; }
                 const fname = `${postCode}_${r.idx}${extFromUrl(r.url, r.kind)}`;
                 attachments[r.idx] = new AttachmentBuilder(r.res.buf, { name: fname });
@@ -859,6 +870,7 @@ module.exports = {
         // 互動統計與未附上的媒體提示共用 footer，保留 Threads 標記供刪除指令辨識。
         const sizeMB = Math.floor(MAX_FILE_SIZE / 1024 / 1024);
         const footerParts = ['Threads', ...formatEngagementStats(postObjects)];
+        if (cdnVideos.length > 0) footerParts.push(`${cdnVideos.length} 個影片超過 ${sizeMB}MB，改用 CDN 播放`);
         if (skippedBig > 0) footerParts.push(`${skippedBig} 個媒體超過 ${sizeMB}MB 未附上`);
         if (failedDownload > 0) footerParts.push(`${failedDownload} 個媒體下載失敗`);
         embed.setFooter({ text: footerParts.join(' • ') });
@@ -906,6 +918,28 @@ module.exports = {
                     .setLabel('開啟引用原文')
                     .setURL(quoted.url)
             );
+        }
+
+        // Discord 的一般 embed 不能設定 video；Media Gallery 可直接引用外部影片。
+        // 保留完整簽名 URL，並獨立發送 V2 訊息，避免與主訊息的 embeds / content 衝突。
+        // 每批附原文按鈕，供 CDN 過期或 Discord 無法載入時使用。
+        for (let i = 0; i < cdnVideos.length; i += MAX_MEDIA_PER_GALLERY) {
+            const gallery = new MediaGalleryBuilder().addItems(
+                cdnVideos.slice(i, i + MAX_MEDIA_PER_GALLERY).map(video =>
+                    new MediaGalleryItemBuilder()
+                        .setURL(video.url)
+                        .setDescription(`Threads 影片 ${video.idx + 1}`))
+            );
+            additionalMessages.push({
+                flags: MessageFlags.IsComponentsV2,
+                components: [
+                    new TextDisplayBuilder()
+                        .setContent('🎬 影片\n若無法播放，請點「開啟原文」。')
+                        .toJSON(),
+                    gallery.toJSON(),
+                    linkRow.toJSON(),
+                ],
+            });
         }
 
         return {

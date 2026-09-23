@@ -134,3 +134,255 @@ test('photo permalink resolves to its parent post through the embed page', async
 		global.fetch = originalFetch;
 	}
 });
+
+test('photo fbid resolves a gm parent post through the embed photo link', async () => {
+	const inputUrl = 'https://www.facebook.com/photo/?fbid=2169155400677688';
+	const canonicalUrl = 'https://www.facebook.com/rodolfo.brarcenas.9/photos/this-team-is-wild/2169155400677688/';
+	const expectedEmbedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(inputUrl)}&show_text=true&width=500`;
+	const parentId = '1397664659240620';
+	const parentLookupUrl = `https://www.facebook.com/${parentId}`;
+	const parentUrl = `https://www.facebook.com/groups/zenlesszonezeroglobal1/posts/${parentId}/`;
+	const embedHtml = `${' '.repeat(3000)}<a href="https://www.facebook.com/photo.php?fbid=2169155400677688&amp;set=gm.${parentId}&amp;type=3&amp;ref=embed_post">photo</a>`;
+	const parentHtml = `<link rel="canonical" href="${parentUrl}"><meta property="og:url" content="${parentUrl}">`;
+	const fetchCalls = [];
+	const originalFetch = global.fetch;
+
+	global.fetch = async (url, options) => {
+		fetchCalls.push({ url: String(url), options });
+
+		if (fetchCalls.length === 1) {
+			return {
+				status: 200,
+				url: inputUrl,
+				text: async () => `<link rel="canonical" href="${canonicalUrl}">`,
+			};
+		}
+
+		if (fetchCalls.length === 2) {
+			return {
+				status: 200,
+				url: expectedEmbedUrl,
+				text: async () => embedHtml,
+			};
+		}
+
+		if (fetchCalls.length === 3) {
+			return {
+				status: 200,
+				url: parentUrl,
+				text: async () => parentHtml,
+			};
+		}
+
+		throw new Error(`unexpected fetch: ${url}`);
+	};
+
+	try {
+		const result = await facebook.resolve(inputUrl);
+
+		assert.equal(result, `https://facebed.com/groups/zenlesszonezeroglobal1/posts/${parentId}`);
+		assert.equal(fetchCalls.length, 3);
+		assert.equal(fetchCalls[0].url, inputUrl);
+		assert.equal(fetchCalls[0].options.redirect, 'follow');
+		assert.equal(fetchCalls[1].url, expectedEmbedUrl);
+		assert.equal(fetchCalls[2].url, parentLookupUrl);
+		assert.equal(fetchCalls[2].options.redirect, 'follow');
+	} finally {
+		global.fetch = originalFetch;
+	}
+});
+
+test('photo embed with an unrelated fbid keeps the photo fallback', async () => {
+	const inputUrl = 'https://www.facebook.com/photo/?fbid=2169155400677688';
+	const canonicalUrl = 'https://www.facebook.com/rodolfo.brarcenas.9/photos/this-team-is-wild/2169155400677688/';
+	const expectedEmbedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(inputUrl)}&show_text=true&width=500`;
+	const embedHtml = `${' '.repeat(3000)}<a href="https://www.facebook.com/photo.php?fbid=9999999999999999&amp;set=gm.1397664659240620&amp;type=3&amp;ref=embed_post">photo</a>`;
+	const fetchCalls = [];
+	const originalFetch = global.fetch;
+
+	global.fetch = async (url, options) => {
+		fetchCalls.push({ url: String(url), options });
+
+		if (fetchCalls.length === 1) {
+			return {
+				status: 200,
+				url: inputUrl,
+				text: async () => `<link rel="canonical" href="${canonicalUrl}">`,
+			};
+		}
+
+		if (fetchCalls.length === 2) {
+			return {
+				status: 200,
+				url: expectedEmbedUrl,
+				text: async () => embedHtml,
+			};
+		}
+
+		throw new Error(`unexpected fetch: ${url}`);
+	};
+
+	try {
+		const result = await facebook.resolve(inputUrl);
+
+		assert.equal(result, 'https://facebed.com/photo.php?fbid=2169155400677688&type=3');
+		assert.equal(fetchCalls.length, 2);
+		assert.equal(fetchCalls[1].url, expectedEmbedUrl);
+	} finally {
+		global.fetch = originalFetch;
+	}
+});
+
+for (const { name, parentResponse } of [
+	{
+		name: 'non-200 response',
+		parentResponse: {
+			status: 500,
+			url: 'https://www.facebook.com/1397664659240620',
+			text: async () => '',
+		},
+	},
+	{
+		name: 'different post ID',
+		parentResponse: {
+			status: 200,
+			url: 'https://www.facebook.com/groups/zenlesszonezeroglobal1/posts/9999999999999999/',
+			text: async () => '<link rel="canonical" href="https://www.facebook.com/groups/zenlesszonezeroglobal1/posts/9999999999999999/">',
+		},
+	},
+	{
+		name: 'login response without group metadata',
+		parentResponse: {
+			status: 200,
+			url: 'https://www.facebook.com/login/',
+			text: async () => '<link rel="canonical" href="https://www.facebook.com/login/">',
+		},
+	},
+]) {
+	test(`photo gm parent lookup keeps the photo fallback on ${name}`, async () => {
+		const inputUrl = 'https://www.facebook.com/photo/?fbid=2169155400677688';
+		const canonicalUrl = 'https://www.facebook.com/rodolfo.brarcenas.9/photos/this-team-is-wild/2169155400677688/';
+		const expectedEmbedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(inputUrl)}&show_text=true&width=500`;
+		const embedHtml = `${' '.repeat(3000)}<a href="https://www.facebook.com/photo.php?fbid=2169155400677688&amp;set=gm.1397664659240620&amp;type=3&amp;ref=embed_post">photo</a>`;
+		const fetchCalls = [];
+		const originalFetch = global.fetch;
+
+		global.fetch = async (url, options) => {
+			fetchCalls.push({ url: String(url), options });
+
+			if (fetchCalls.length === 1) {
+				return {
+					status: 200,
+					url: inputUrl,
+					text: async () => `<link rel="canonical" href="${canonicalUrl}">`,
+				};
+			}
+
+			if (fetchCalls.length === 2) {
+				return {
+					status: 200,
+					url: expectedEmbedUrl,
+					text: async () => embedHtml,
+				};
+			}
+
+			if (fetchCalls.length === 3) return parentResponse;
+			throw new Error(`unexpected fetch: ${url}`);
+		};
+
+		try {
+			const result = await facebook.resolve(inputUrl);
+
+			assert.equal(result, 'https://facebed.com/photo.php?fbid=2169155400677688&type=3');
+			assert.equal(fetchCalls.length, 3);
+			assert.equal(fetchCalls[2].url, 'https://www.facebook.com/1397664659240620');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+}
+
+test('direct group post embed keeps its trailing slash out of the result and accepts ref after another query', async () => {
+	const inputUrl = 'https://www.facebook.com/photo/?fbid=2169155400677688';
+	const canonicalUrl = 'https://www.facebook.com/rodolfo.brarcenas.9/photos/this-team-is-wild/2169155400677688/';
+	const expectedEmbedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(inputUrl)}&show_text=true&width=500`;
+	const parentId = '1397664659240620';
+	const embedHtml = `${' '.repeat(3000)}<a href="/groups/zenlesszonezeroglobal1/posts/${parentId}/?source=embed&amp;ref=embed_post">post</a>`;
+	const fetchCalls = [];
+	const originalFetch = global.fetch;
+
+	global.fetch = async (url, options) => {
+		fetchCalls.push({ url: String(url), options });
+
+		if (fetchCalls.length === 1) {
+			return {
+				status: 200,
+				url: inputUrl,
+				text: async () => `<link rel="canonical" href="${canonicalUrl}">`,
+			};
+		}
+
+		if (fetchCalls.length === 2) {
+			return {
+				status: 200,
+				url: expectedEmbedUrl,
+				text: async () => embedHtml,
+			};
+		}
+
+		throw new Error(`unexpected fetch: ${url}`);
+	};
+
+	try {
+		const result = await facebook.resolve(inputUrl);
+
+		assert.equal(result, `https://facebed.com/groups/zenlesszonezeroglobal1/posts/${parentId}`);
+		assert.equal(fetchCalls.length, 2);
+		assert.equal(fetchCalls[1].url, expectedEmbedUrl);
+	} finally {
+		global.fetch = originalFetch;
+	}
+});
+
+test('photo pcb set does not become a photo owner post before resolving the embed parent', async () => {
+	const inputUrl = 'https://www.facebook.com/photo/?fbid=2169155400677688&set=pcb.987654321';
+	const canonicalUrl = 'https://www.facebook.com/rodolfo.brarcenas.9/photos/this-team-is-wild/2169155400677688/';
+	const expectedEmbedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(inputUrl)}&show_text=true&width=500`;
+	const parentId = '1397664659240620';
+	const embedHtml = `${' '.repeat(3000)}<a href="/groups/zenlesszonezeroglobal1/posts/${parentId}/?ref=embed_post">post</a>`;
+	const fetchCalls = [];
+	const originalFetch = global.fetch;
+
+	global.fetch = async (url, options) => {
+		fetchCalls.push({ url: String(url), options });
+
+		if (fetchCalls.length === 1) {
+			return {
+				status: 200,
+				url: inputUrl,
+				text: async () => `<link rel="canonical" href="${canonicalUrl}">`,
+			};
+		}
+
+		if (fetchCalls.length === 2) {
+			return {
+				status: 200,
+				url: expectedEmbedUrl,
+				text: async () => embedHtml,
+			};
+		}
+
+		throw new Error(`unexpected fetch: ${url}`);
+	};
+
+	try {
+		const result = await facebook.resolve(inputUrl);
+
+		assert.equal(result, `https://facebed.com/groups/zenlesszonezeroglobal1/posts/${parentId}`);
+		assert.equal(fetchCalls.length, 2);
+		assert.equal(fetchCalls[1].url, expectedEmbedUrl);
+		assert.ok(!result.includes('/photo/posts/'), 'pcb must not use photo as a post owner');
+	} finally {
+		global.fetch = originalFetch;
+	}
+});

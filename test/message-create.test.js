@@ -6,7 +6,7 @@ const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { Collection } = require('discord.js');
+const { Collection, ComponentType, MessageFlags } = require('discord.js');
 
 const testDataDir = mkdtempSync(join(tmpdir(), 'gptjsbot-message-create-'));
 process.env.BOT_DATA_DIR = testDataDir;
@@ -47,6 +47,47 @@ function source(content = 'https://www.threads.com/@alice/post/one') {
 
 function media(files = [], additionalMessages = []) {
   return { type: 'embed', embed: { description: 'Threads media' }, files, additionalMessages };
+}
+
+function threadsVideoPage({ canonicalUrl, code, username, videoUrl }) {
+  const displayName = username.replace(/[._]/g, ' ');
+  const post = {
+    code,
+    id: `${code}-id`,
+    user: { username },
+    caption: { text: 'Oversized Threads video' },
+    video_versions: [{ url: videoUrl, width: 1280 }],
+  };
+  return [
+    `<meta property="og:title" content="${displayName} (@${username}) on Threads">`,
+    '<meta property="og:description" content="Oversized Threads video">',
+    `<meta property="og:url" content="${canonicalUrl}">`,
+    `<link rel="canonical" href="${canonicalUrl}">`,
+    `<script type="application/json" data-sjs>${JSON.stringify(post)}</script>`,
+  ].join('');
+}
+
+function componentJson(component) {
+  return typeof component?.toJSON === 'function' ? component.toJSON() : component;
+}
+
+function v2MediaMessage(url) {
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [
+      { type: ComponentType.TextDisplay, content: '🎬 影片' },
+      { type: ComponentType.MediaGallery, items: [{ media: { url } }] },
+      {
+        type: ComponentType.ActionRow,
+        components: [{
+          type: ComponentType.Button,
+          style: 5,
+          label: '開啟原文',
+          url: 'https://www.threads.com/@alice/post/one',
+        }],
+      },
+    ],
+  };
 }
 
 function assertOwned(sent, message) {
@@ -179,6 +220,124 @@ test('mixed URL replies record every primary and separate Facebook media message
   assert.equal(sent.length, 4);
   for (const reply of sent) assertOwned(reply, message);
   assert.deepEqual(sent[1].payload.files, ['facebook-file-9']);
+});
+
+test('oversized Threads video sends a CDN Components V2 message that remains deletable', async t => {
+  const canonicalUrl = 'https://www.threads.com/@target.user/post/OversizedVideo';
+  const videoUrl = 'https://scontent-example.cdninstagram.com/v/t.mp4?stp=dst-mp4';
+  const html = threadsVideoPage({
+    canonicalUrl,
+    code: 'OversizedVideo',
+    username: 'target.user',
+    videoUrl,
+  });
+  t.mock.method(global, 'fetch', async (url, options) => {
+    const requested = String(url);
+    if (requested === canonicalUrl) {
+      assert.equal(options.redirect, 'manual');
+      return new Response(html);
+    }
+    assert.equal(requested, videoUrl);
+    assert.equal(options.redirect, undefined);
+    return new Response('x', {
+      headers: { 'content-length': String(10 * 1024 * 1024 + 1) },
+    });
+  });
+
+  const { message, sent } = source(canonicalUrl);
+  await event.execute(message);
+
+  assert.equal(sent.length, 2);
+  const primary = sent[0].payload;
+  const cdnMessage = sent[1].payload;
+  assert.equal(primary.reply.messageReference, message.id);
+  assert.equal(primary.embeds.length, 1);
+  assert.match(primary.embeds[0].toJSON().footer.text, /改用 CDN 播放/);
+  assert.equal(primary.components[0].components[0].label, '開啟原文');
+  assert.equal(primary.components[0].components[0].url, canonicalUrl);
+
+  assert.equal(cdnMessage.flags, MessageFlags.IsComponentsV2);
+  assert.equal(cdnMessage.content, undefined);
+  assert.equal(cdnMessage.embeds, undefined);
+  assert.equal(cdnMessage.files, undefined);
+  const components = cdnMessage.components.map(componentJson);
+  assert.deepEqual(components.map(component => component.type), [
+    ComponentType.TextDisplay,
+    ComponentType.MediaGallery,
+    ComponentType.ActionRow,
+  ]);
+  assert.equal(components[1].items[0].media.url, videoUrl);
+  assert.equal(components[2].components[0].url, canonicalUrl);
+  assertOwned(sent[0], message);
+  assertOwned(sent[1], message);
+
+  const deleteMessage = require('../commands/delete-message');
+  let deleted = false;
+  let response;
+  const target = {
+    id: sent[1].id,
+    author: { id: 'bot-id', bot: true },
+    guildId: message.guildId,
+    channelId: message.channelId,
+    content: '',
+    embeds: [],
+    components: cdnMessage.components,
+    delete: async () => { deleted = true; },
+  };
+  await deleteMessage.execute({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    targetId: target.id,
+    targetMessage: target,
+    client: { user: { id: 'bot-id' } },
+    user: { id: message.author.id },
+    memberPermissions: { has: () => false },
+    deferReply: async () => {},
+    editReply: async payload => { response = payload.content; },
+  });
+  assert.equal(deleted, true);
+  assert.equal(response, '✅ 已刪除這則網址轉換訊息。');
+  assert.equal(getConvertedMessage(sent[1].id, message.guildId, message.channelId), undefined);
+  assertOwned(sent[0], message);
+});
+
+test('mixed URL conversion keeps a CDN Components V2 extra beside the primary conversion', async t => {
+  const videoUrl = 'https://scontent-example.cdninstagram.com/mixed.mp4';
+  t.mock.method(threads, 'resolve', async () => media([], [v2MediaMessage(videoUrl)]));
+  const { message, sent } = source(
+    'https://www.threads.com/@alice/post/one https://www.pixiv.net/artworks/123',
+  );
+  await event.execute(message);
+
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].payload.content, 'https://phixiv.net/artworks/123');
+  assert.ok(sent[0].payload.embeds?.length);
+  assert.equal(sent[1].payload.flags, MessageFlags.IsComponentsV2);
+  assert.equal(sent[1].payload.components[1].items[0].media.url, videoUrl);
+  assertOwned(sent[0], message);
+  assertOwned(sent[1], message);
+});
+
+test('a failed Components V2 extra does not block later additional message batches', async t => {
+  t.mock.method(threads, 'resolve', async () => media([], [
+    v2MediaMessage('https://scontent-example.cdninstagram.com/failed.mp4'),
+    { files: ['later-extra'] },
+  ]));
+  t.mock.method(console, 'warn', () => {});
+  const { message, sent } = source();
+  const originalSend = message.channel.send;
+  t.mock.method(message.channel, 'send', async payload => {
+    if (payload.flags === MessageFlags.IsComponentsV2) throw new Error('V2 send failed');
+    return originalSend(payload);
+  });
+
+  await event.execute(message);
+
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1].payload.files, ['later-extra']);
+  assert.equal(sent[1].payload.flags, undefined);
+  assertOwned(sent[0], message);
+  assertOwned(sent[1], message);
 });
 
 test('guild conversions are recorded while DM conversions are not', async t => {

@@ -141,12 +141,19 @@ module.exports = {
 		}
 		for (const msg of extra) {
 			try {
-				await sendConvertedMessage(message, {
-					content: msg.content,
-					files:   msg.files,
-					embeds:  msg.embeds ? msg.embeds.map(e => new EmbedBuilder(e)) : undefined,
+				// 額外訊息可能是一般附件批次，也可能是 Components V2；只轉送
+				// handler 支援的欄位，讓 handler 決定每種訊息的合法組合。
+				const extraPayload = {
 					allowedMentions: { repliedUser: false },
-				});
+				};
+				if (msg.content !== undefined) extraPayload.content = msg.content;
+				if (msg.files !== undefined) extraPayload.files = msg.files;
+				if (msg.embeds) {
+					extraPayload.embeds = msg.embeds.map(e => new EmbedBuilder(e));
+				}
+				if (msg.flags !== undefined) extraPayload.flags = msg.flags;
+				if (msg.components) extraPayload.components = msg.components;
+				await sendConvertedMessage(message, extraPayload);
 			} catch (err) {
 				console.warn('無法送出額外媒體訊息：', err);
 			}

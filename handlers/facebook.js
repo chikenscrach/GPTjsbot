@@ -6,20 +6,33 @@ const FETCH_TIMEOUT_MS = 8000;
 
 /**
  * 用 plugins/post.php 外嵌還原「相片所屬的母貼文」
- * 使用爬蟲 UA，抽取 ?ref=embed_post 連結
+ * 使用爬蟲 UA，抽取 ref=embed_post 連結；群組相片可能只提供 set=gm.<母貼文id>。
  */
 async function fetchEmbed(href, headers) {
 	const url = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
 	const r = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	const html = await r.text();
-	if (r.status !== 200 || html.length < 3000) return null;
+	if (r.status !== 200) return null;
 
-	// 母貼文標準連結：<a href="/{owner}/posts/{id}?ref=embed_post">
-	const m = html.match(/href="\/([^"?]+\/posts\/\d+)\?ref=embed_post"/i)
-		|| html.match(/facebook\.com\/([^"'\\?]+\/posts\/\d+)\?ref=embed_post/i);
+	const links = [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1/gi)]
+		.map(match => parseFacebookUrl(match[2]))
+		.filter(link => link && link.searchParams.get('ref') === 'embed_post');
+	for (const link of links) {
+		if (/^\/(?:[^/]+\/posts|groups\/[^/]+\/(?:posts|permalink))\/\d+\/?$/.test(link.pathname)) {
+			return `https://www.facebook.com${link.pathname.replace(/\/$/, '')}`;
+		}
+	}
 
-	if (m) {
-		return `https://www.facebook.com/${m[1]}`;
+	// 只採用同一張相片的群組母文 ID，避免從推薦或其他相片誤抓貼文。
+	const photoId = photoIdFromUrl(href);
+	if (photoId) {
+		const parentIds = new Set();
+		for (const link of links) {
+			if (photoIdFromUrl(link.href) !== photoId) continue;
+			const parentId = link.searchParams.get('set')?.match(/^gm\.(\d+)$/)?.[1];
+			if (parentId) parentIds.add(parentId);
+		}
+		if (parentIds.size === 1) return fetchGroupPost([...parentIds][0], headers);
 	}
 	return null;
 }
@@ -38,6 +51,56 @@ const isPhotoUrl = (value) => {
 		return false;
 	}
 };
+
+function parseFacebookUrl(value) {
+	if (!value) return null;
+	try {
+		const parsed = new URL(decodeEntities(value), 'https://www.facebook.com');
+		return /^https?:$/.test(parsed.protocol) && /(^|\.)(?:facebook|fb)\.com$/i.test(parsed.hostname)
+			&& !parsed.username && !parsed.password ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function photoIdFromUrl(value) {
+	const parsed = parseFacebookUrl(value);
+	if (!parsed || !isPhotoUrl(parsed.href)) return null;
+	const id = parsed.searchParams.get('fbid')
+		|| parsed.pathname.match(/\/photos\/(?:[^/]+\/)*(\d+)\/?$/i)?.[1];
+	return id && /^\d+$/.test(id) ? id : null;
+}
+
+async function fetchGroupPost(postId, headers) {
+	// Facebook 可由全域貼文 ID 導向所屬群組，無須把相片作者誤當成群組。
+	const r = await fetch(`https://www.facebook.com/${postId}`, {
+		headers, redirect: 'follow', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+	});
+	if (r.status !== 200) {
+		await r.body?.cancel();
+		return null;
+	}
+	const html = await r.text();
+	const redirected = parseFacebookUrl(r.url);
+	const candidates = [r.url];
+	if (redirected?.pathname.startsWith('/login')) candidates.push(redirected.searchParams.get('next'));
+	for (const tag of html.match(/<(?:link|meta)\b[^>]*>/gi) || []) {
+		const attrs = {};
+		for (const match of tag.matchAll(/\b([\w:-]+)\s*=\s*(["'])(.*?)\2/g)) {
+			attrs[match[1].toLowerCase()] = match[3];
+		}
+		if (attrs.rel?.toLowerCase() === 'canonical') candidates.push(attrs.href);
+		if (attrs.property?.toLowerCase() === 'og:url') candidates.push(attrs.content);
+	}
+	for (const candidate of candidates) {
+		const parsed = parseFacebookUrl(candidate);
+		const match = parsed?.pathname.match(/^\/groups\/([^/]+)\/(?:posts|permalink)\/(\d+)\/?$/);
+		if (match && match[2] === postId) {
+			return `https://www.facebook.com/groups/${match[1]}/posts/${postId}`;
+		}
+	}
+	return null;
+}
 
 // 影片 ID 已足夠定位影片；移除標題、發布者路徑與追蹤參數。
 const normalizeVideoUrl = (value) => {
@@ -130,10 +193,10 @@ module.exports = {
 				const setParam = urlObj.searchParams.get('set');
 
 				// 若 set=pcb.<母貼文id>，直接由 set 還原母貼文
-				if (setParam && setParam.startsWith('pcb.')) {
-					const parentId = setParam.replace('pcb.', '');
+				const parentId = setParam?.match(/^pcb\.(\d+)$/)?.[1];
+				if (parentId) {
 					const parts = urlObj.pathname.split('/').filter(Boolean);
-					const owner = parts[0] && parts[0] !== 'photo.php' ? parts[0] : null;
+					const owner = parts[1] === 'photos' && parts[0] !== 'groups' ? parts[0] : null;
 					if (owner) {
 						resultUrl = `https://www.facebook.com/${owner}/posts/${parentId}`;
 					}

@@ -24,6 +24,20 @@ Threads 預覽會在 embed 底部依序顯示愛心、留言、轉發與分享�
 
 轉發次數包含一般轉發與引用轉發，與 Threads 頁面的按鈕一致。數字是產生預覽時取得的資料，不會自動更新；頁面未提供的項目顯示 `—`，實際為零則顯示 `0`。媒體過大或下載失敗的提示仍會保留在底部。
 
+### Threads 大型影片
+
+影片在 10MiB 以內時，Bot 會下載並上傳為 Discord 附件。超過上限時會停止下載，改用額外的 Media Gallery 訊息直接引用 Threads CDN 播放，每批最多 10 支影片，並保留貼文預覽與互動次數。
+
+CDN 網址從貼文資料取得，會保留完整簽名參數。播放仍取決於 Discord 能否讀取該網址；連結可能過期，無法播放時可用影片下方的「開啟原文」按鈕。超限圖片與下載失敗的媒體仍顯示原有提示。
+
+Media Gallery 使用 [Discord Components V2](https://docs.discord.com/developers/components/reference#media-gallery)，與一般 embed 分開發送；Bot 不會重新上傳超限影片。
+
+### Facebook 相片與群組文章
+
+`/photo/?fbid=...`、`/photo.php?fbid=...` 與 `/{發布者}/photos/...` 會嘗試從外嵌頁還原相片所屬文章。群組相片若只提供 `set=gm.<母貼文ID>`，會再追蹤該貼文 ID 的重新導向，確認 ID 相符後轉成 `https://facebed.com/groups/{群組}/posts/{母貼文ID}`。
+
+例如 `https://www.facebook.com/photo/?fbid=2169155400677688` 可還原為 `https://facebed.com/groups/zenlesszonezeroglobal1/posts/1397664659240620`。無法確認所屬群組時，保留相片網址作為備援。
+
 ### Facebook 影片網址
 
 `/{發布者}/videos/{標題}/{影片ID}`、`/{發布者}/videos/{影片ID}` 與 `/watch/?v={影片ID}` 會統一轉成 `https://facebed.com/watch/?v={影片ID}`，移除標題與追蹤參數。

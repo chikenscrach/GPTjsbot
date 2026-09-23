@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { MessageFlags } = require('discord.js');
 
 const threads = require('../handlers/threads');
 
@@ -9,6 +10,7 @@ const INVALID_POST_URL = 'https://www.threads.com/?error=invalid_post';
 const LOCK_NOTICE = '🔒 此貼文需要登入 Threads 才能檢視（私人帳號或限定內容）';
 const DELETED_NOTICE = '網址錯誤或脆文已刪除';
 const UNAVAILABLE_NOTICE = '🔒 無法取得此貼文內容，可能需要登入 Threads 才能檢視。請點「開啟原文」查看。';
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 function makeResponse({
     status = 200,
@@ -16,8 +18,16 @@ function makeResponse({
     html = '',
     bodyChunks = null,
     declaredContentLength = null,
+    omitContentLength = false,
+    tracker = null,
 } = {}) {
     const chunks = bodyChunks && bodyChunks.map(chunk => Buffer.from(chunk));
+    if (tracker) {
+        tracker.readChunks = 0;
+        tracker.bytesRead = 0;
+        tracker.cancelled = false;
+        tracker.aborted = false;
+    }
     return {
         status,
         ok: status >= 200 && status < 300,
@@ -25,6 +35,7 @@ function makeResponse({
             get(name) {
                 const key = name.toLowerCase();
                 if (key === 'location') return location;
+                if (key === 'content-length' && omitContentLength) return null;
                 if (key === 'content-length' && declaredContentLength != null) {
                     return String(declaredContentLength);
                 }
@@ -35,9 +46,21 @@ function makeResponse({
             },
         },
         body: {
-            cancel: async () => undefined,
+            cancel: async reason => {
+                if (tracker) {
+                    tracker.cancelled = true;
+                    tracker.cancelReason = reason;
+                }
+            },
             async *[Symbol.asyncIterator]() {
-                for (const chunk of chunks || []) yield chunk;
+                for (const chunk of chunks || []) {
+                    if (tracker?.cancelled) return;
+                    if (tracker) {
+                        tracker.readChunks++;
+                        tracker.bytesRead += chunk.length;
+                    }
+                    yield chunk;
+                }
             },
         },
         text: async () => html,
@@ -51,6 +74,11 @@ async function withFetchScript(steps, callback) {
         const step = steps[callIndex++];
         assert.ok(step, `unexpected fetch: ${url}`);
         assert.equal(String(url), step.url);
+        if (step.tracker && options.signal) {
+            const markAborted = () => { step.tracker.aborted = true; };
+            if (options.signal.aborted) markAborted();
+            else options.signal.addEventListener('abort', markAborted, { once: true });
+        }
         if (step.manual === false) assert.equal(options.redirect, undefined);
         else assert.equal(options.redirect, 'manual');
         return makeResponse(step);
@@ -119,6 +147,27 @@ function assertEmbedResult(result, {
 
 function assertEmbedFooter(result, text) {
     assert.equal(result.embed.footer?.text, text);
+}
+
+function assertCdnGalleryMessage(message, expectedUrls, canonicalUrl) {
+    assert.equal(message.flags, MessageFlags.IsComponentsV2);
+    assert.equal(message.content, undefined);
+    assert.equal(message.embeds, undefined);
+    assert.equal(message.files, undefined);
+
+    const textDisplay = message.components.find(component => component.type === 10);
+    const gallery = message.components.find(component => component.type === 12);
+    const actionRow = message.components.find(component => component.type === 1);
+    assert.ok(textDisplay);
+    assert.ok(gallery);
+    assert.ok(actionRow);
+    assert.deepEqual(
+        gallery.items.map(item => item.media?.url),
+        expectedUrls,
+    );
+    const originalButton = actionRow.components.find(button => button.label === '開啟原文');
+    assert.ok(originalButton);
+    assert.equal(originalButton.url, canonicalUrl);
 }
 
 function assertUnavailableNotice(result, canonicalUrl) {
@@ -1277,6 +1326,177 @@ test('failed media download keeps the engagement footer and appends its warning'
     assertEmbedFooter(
         result,
         'Threads • ❤️ 18,141 • 💬 4,738 • 🔁 835 • ✈️ 496 • 1 個媒體下載失敗',
+    );
+});
+
+test('declared oversized video skips the body and creates one CDN gallery batch', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/DeclaredOversizedVideo';
+    const videoUrl = 'https://scontent-example.cdninstagram.com/video-declared.mp4?oe=7f&token='
+        + 'x'.repeat(1940);
+    const tracker = {};
+    assert.ok(videoUrl.length > 2000 && videoUrl.length < 2048);
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'DeclaredOversizedVideo',
+            caption: { text: 'Declared oversized video caption' },
+            video_versions: [{ url: videoUrl, width: 1280 }],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        {
+            url: videoUrl,
+            status: 200,
+            manual: false,
+            declaredContentLength: MAX_FILE_SIZE + 1,
+            bodyChunks: [Buffer.from('body must not be read')],
+            tracker,
+        },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(tracker.readChunks, 0);
+    assert.equal(tracker.aborted, true);
+    assert.equal(result.files.length, 0);
+    assertEmbedFooter(
+        result,
+        'Threads • ❤️ — • 💬 — • 🔁 — • ✈️ — • 1 個影片超過 10MB，改用 CDN 播放',
+    );
+    assert.equal(result.additionalMessages.length, 1);
+    assertCdnGalleryMessage(result.additionalMessages[0], [videoUrl], canonicalUrl);
+});
+
+test('streaming oversized video aborts at the first excess chunk without reading later chunks', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/StreamingOversizedVideo';
+    const videoUrl = 'https://scontent-example.cdninstagram.com/video-streaming.mp4?token=streaming';
+    const tracker = {};
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'StreamingOversizedVideo',
+            caption: { text: 'Streaming oversized video caption' },
+            video_versions: [{ url: videoUrl, width: 1280 }],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        {
+            url: videoUrl,
+            status: 200,
+            manual: false,
+            omitContentLength: true,
+            bodyChunks: [
+                Buffer.alloc(MAX_FILE_SIZE),
+                Buffer.from('overflow'),
+                Buffer.from('this chunk must not be read'),
+            ],
+            tracker,
+        },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(tracker.readChunks, 2);
+    assert.equal(tracker.bytesRead, MAX_FILE_SIZE + Buffer.byteLength('overflow'));
+    assert.equal(tracker.aborted, true);
+    assert.equal(result.files.length, 0);
+    assert.equal(result.additionalMessages.length, 1);
+    assertCdnGalleryMessage(result.additionalMessages[0], [videoUrl], canonicalUrl);
+});
+
+test('a video exactly at 10 MiB remains an attachment and does not create a CDN message', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/ExactLimitVideo';
+    const videoUrl = 'https://cdn.example.test/exact-limit.mp4?quality=full';
+    const tracker = {};
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'ExactLimitVideo',
+            caption: { text: 'Exact limit video caption' },
+            video_versions: [{ url: videoUrl, width: 1280 }],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        {
+            url: videoUrl,
+            manual: false,
+            bodyChunks: [Buffer.alloc(MAX_FILE_SIZE)],
+            tracker,
+        },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(tracker.readChunks, 1);
+    assert.equal(tracker.bytesRead, MAX_FILE_SIZE);
+    assert.equal(tracker.aborted, false);
+    assert.equal(result.files.length, 1);
+    assert.equal(result.files[0].name, 'ExactLimitVideo_0.mp4');
+    assert.equal(result.additionalMessages.length, 0);
+    assert.equal(result.embed.footer.text.includes('改用 CDN 播放'), false);
+});
+
+test('small video stays as an attachment without a CDN gallery', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/SmallVideo';
+    const videoUrl = 'https://cdn.example.test/small-video.mp4';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'SmallVideo',
+            caption: { text: 'Small video caption' },
+            video_versions: [{ url: videoUrl, width: 1280 }],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        { url: videoUrl, manual: false, bodyChunks: ['small-video'] },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(result.files.length, 1);
+    assert.equal(result.files[0].name, 'SmallVideo_0.mp4');
+    assert.equal(result.additionalMessages.length, 0);
+    assert.equal(result.embed.footer.text.includes('改用 CDN 播放'), false);
+});
+
+test('more than ten oversized videos are split in URL order while a mixed image stays attached', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/BatchCdnVideos';
+    const videoUrls = Array.from({ length: 11 }, (_, index) =>
+        `https://scontent-example.cdninstagram.com/video-${index}.mp4?oe=7f&token=${'x'.repeat(1940)}`
+    );
+    const imageUrl = 'https://cdn.example.test/mixed-image.jpg';
+    assert.ok(videoUrls.every(url => url.length > 2000 && url.length < 2048));
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        chunks: [{
+            code: 'BatchCdnVideos',
+            caption: { text: 'Batch CDN mixed media caption' },
+            carousel_media: [
+                ...videoUrls.map(url => ({ video_versions: [{ url, width: 1280 }] })),
+                imageMedia(imageUrl),
+            ],
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+        ...videoUrls.map(url => ({
+            url,
+            manual: false,
+            declaredContentLength: MAX_FILE_SIZE + 1,
+            bodyChunks: [Buffer.from('must not be read')],
+        })),
+        { url: imageUrl, manual: false, bodyChunks: ['image-bytes'] },
+    ], () => threads.resolve(canonicalUrl));
+
+    assert.equal(result.files.length, 1);
+    assert.equal(result.files[0].name, 'BatchCdnVideos_11.jpg');
+    assert.equal(result.additionalMessages.length, 2);
+    assertCdnGalleryMessage(result.additionalMessages[0], videoUrls.slice(0, 10), canonicalUrl);
+    assertCdnGalleryMessage(result.additionalMessages[1], videoUrls.slice(10), canonicalUrl);
+    assertEmbedFooter(
+        result,
+        'Threads • ❤️ — • 💬 — • 🔁 — • ✈️ — • 11 個影片超過 10MB，改用 CDN 播放',
     );
 });
 
