@@ -474,7 +474,14 @@ test('logger settings survive clean and abrupt process restarts with a persisten
       });
       assert.ifError(writeResult.error);
       if (shutdown === 'abrupt') {
-        assert.equal(writeResult.signal, 'SIGKILL', writeResult.stderr);
+        if (process.platform === 'win32') {
+          // Windows reports a self-inflicted SIGKILL as exit code 1, not a signal.
+          assert.equal(writeResult.signal, null);
+          assert.equal(writeResult.status, 1, writeResult.stderr);
+          assert.equal(writeResult.stderr, '');
+        } else {
+          assert.equal(writeResult.signal, 'SIGKILL', writeResult.stderr);
+        }
       } else {
         assert.equal(writeResult.status, 0, writeResult.stderr);
       }
