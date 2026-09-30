@@ -633,6 +633,175 @@ for (const [label, content] of [
     });
 }
 
+for (const [label, takenAt, epochSeconds] of [
+    ['number', 1800000000, 1800000000],
+    ['numeric string', '1800000123', 1800000123],
+]) {
+    test(`post taken_at as a ${label} adds a relative timestamp before the caption`, async () => {
+        const canonicalUrl = 'https://www.threads.com/@target.user/post/PostTimestamp';
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            ogDescription: null,
+            chunks: [{
+                code: 'PostTimestamp',
+                taken_at: takenAt,
+                caption: { text: '  Timestamp caption  ' },
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        assertEmbedResult(result, {
+            canonicalUrl,
+            description: `<t:${epochSeconds}:R>\n\nTimestamp caption`,
+        });
+    });
+}
+
+test('a compatible duplicate fills taken_at when the richest media copy omits it', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/TimestampDuplicate';
+    const identity = {
+        id: 'timestamp-post-id',
+        pk: 'timestamp-post-pk',
+        code: 'TimestampDuplicate',
+        user: { username: 'target.user' },
+    };
+    const firstImage = 'https://cdn.example.test/timestamp-duplicate-1.jpg';
+    const secondImage = 'https://cdn.example.test/timestamp-duplicate-2.jpg';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        chunks: [
+            {
+                ...identity,
+                taken_at: 1800000456,
+                caption: { text: 'Duplicate timestamp caption' },
+            },
+            {
+                ...identity,
+                carousel_media: [imageMedia(firstImage), imageMedia(secondImage)],
+            },
+        ],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: '<t:1800000456:R>\n\nDuplicate timestamp caption',
+        imageUrl: firstImage,
+    });
+    assert.equal(result.embeds.length, 2);
+    assert.equal(result.embeds[1].image.url, secondImage);
+});
+
+for (const [label, mainTakenAt, expectedDescription] of [
+    ['main post time wins', 1800000789, '<t:1800000789:R>\n\nMain post caption'],
+    ['related post times are ignored', undefined, 'Main post caption'],
+]) {
+    test(`${label} when a quote, reply, and recommendation carry other times`, async () => {
+        const canonicalUrl = 'https://www.threads.com/@target.user/post/IsolatedPostTimestamp';
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            ogDescription: null,
+            chunks: [{
+                code: 'IsolatedPostTimestamp',
+                caption: { text: 'Main post caption' },
+                ...(mainTakenAt === undefined ? {} : { taken_at: mainTakenAt }),
+                text_post_app_info: {
+                    share_info: {
+                        quoted_post: {
+                            code: 'OtherQuote',
+                            taken_at: 1700000001,
+                            user: { username: 'quoted.user' },
+                            caption: { text: 'Quoted caption' },
+                        },
+                    },
+                },
+                replies: [{ code: 'OtherReply', taken_at: 1700000002 }],
+                recommendations: [{ code: 'OtherRecommendation', taken_at: 1700000003 }],
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        assertEmbedResult(result, {
+            canonicalUrl,
+            description: expectedDescription,
+        });
+    });
+}
+
+test('a captionless image post keeps its timestamp in the description', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/TimedImage';
+    const imageUrl = 'https://cdn.example.test/timed-image.jpg';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        chunks: [{
+            code: 'TimedImage',
+            taken_at: 1800000987,
+            caption: { text: '' },
+            ...imageMedia(imageUrl),
+        }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertEmbedResult(result, {
+        canonicalUrl,
+        description: '<t:1800000987:R>',
+        imageUrl,
+    });
+});
+
+test('a timestamp by itself does not turn an unavailable post into an embed', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/TimestampOnly';
+    const html = postHtml({
+        pageUrl: canonicalUrl,
+        ogDescription: null,
+        chunks: [{ code: 'TimestampOnly', taken_at: 1800000123 }],
+    });
+
+    const result = await withFetchScript([
+        { url: canonicalUrl, html },
+    ], () => threads.resolve(canonicalUrl));
+
+    assertUnavailableNotice(result, canonicalUrl);
+});
+
+test('invalid post timestamps neither throw nor change the caption', async () => {
+    const canonicalUrl = 'https://www.threads.com/@target.user/post/InvalidPostTimestamp';
+    for (const takenAt of [null, '', 'not-a-timestamp', 0, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
+        const html = postHtml({
+            pageUrl: canonicalUrl,
+            ogDescription: null,
+            chunks: [{
+                code: 'InvalidPostTimestamp',
+                taken_at: takenAt,
+                caption: { text: '  Caption stays unchanged  ' },
+            }],
+        });
+
+        const result = await withFetchScript([
+            { url: canonicalUrl, html },
+        ], () => threads.resolve(canonicalUrl));
+
+        assertEmbedResult(result, {
+            canonicalUrl,
+            description: 'Caption stays unchanged',
+        });
+    }
+});
+
 test('a finished poll with unavailable tallies keeps a result field after a username redirect', async () => {
     const initialUrl = 'https://threads.com/@old.user/post/LivePoll';
     const redirectedUrl = 'https://www.threads.com/@new.user/post/LivePoll?xmt=tracking';
