@@ -445,6 +445,16 @@ function normalizeEngagementCount(value) {
     return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function findPostTimestamp(objects) {
+    // taken_at 是 Unix 秒；只從已驗證的主文補值，不取引用、留言或推薦的時間。
+    for (const obj of objects) {
+        const timestamp = normalizeEngagementCount(obj.taken_at);
+        if (timestamp !== null && timestamp > 0
+            && Number.isFinite(new Date(timestamp * 1000).getTime())) return timestamp;
+    }
+    return null;
+}
+
 function formatEngagementStats(objects) {
     // 僅讀取已驗證的主文物件，不遞迴讀取引用、留言或推薦內容。
     // 同一貼文可能有多份 SSR 物件，逐欄補足資料；0 是有效數字。
@@ -816,7 +826,11 @@ module.exports = {
             .setURL(cleanUrl)
             .setAuthor({ name: `${displayName} (@${username})`, url: cleanUrl });
         if (profilePic) embed.setThumbnail(profilePic);
-        if (caption && caption.trim()) embed.setDescription(caption.trim());
+        const postTimestamp = findPostTimestamp(postObjects);
+        // Discord 相對時間會自動更新，hover 顯示使用者當地的完整日期與時間。
+        const description = [postTimestamp === null ? '' : `<t:${postTimestamp}:R>`, caption.trim()]
+            .filter(Boolean).join('\n\n');
+        if (description) embed.setDescription(description);
         if (quoted) {
             // Discord field value 上限 1024
             let qv = quoted.caption.trim();
