@@ -14,6 +14,7 @@
 | `/ping` | 測試 Discord API 延遲 |
 | `/avatar` | 取得使用者頭像 |
 | `/info` | 查看伺服器或使用者資訊 |
+| `/xtranslate` | 設定、查看或重設個人的 X 貼文翻譯語言與預覽服務。[使用範例](url-converter.md#x-貼文翻譯) |
 | `/help` | 顯示可用指令 |
 
 ## `/quest`

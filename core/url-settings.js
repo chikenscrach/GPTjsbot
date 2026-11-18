@@ -19,6 +19,26 @@ const upsertMaster = db.prepare(`INSERT INTO url_conversion_settings (guild_id, 
 const upsertTarget = db.prepare(`INSERT INTO url_conversion_overrides (guild_id, target, enabled) VALUES (?, ?, ?)
   ON CONFLICT(guild_id, target) DO UPDATE SET enabled = excluded.enabled`);
 const deleteTarget = db.prepare('DELETE FROM url_conversion_overrides WHERE guild_id = ? AND target = ?');
+const selectTwitter = db.prepare('SELECT target_host, language FROM twitter_user_preferences WHERE user_id = ?');
+const upsertTwitter = db.prepare(`INSERT INTO twitter_user_preferences (user_id, target_host, language)
+  VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET
+    target_host = COALESCE(excluded.target_host, target_host),
+    language = COALESCE(excluded.language, language)`);
+const deleteTwitter = db.prepare('DELETE FROM twitter_user_preferences WHERE user_id = ?');
+
+function getTwitterPreferences(userId) {
+  const row = userId ? selectTwitter.get(userId) : undefined;
+  const defaults = settings.handlers.twitter;
+  return { targetHost: row?.target_host ?? defaults.targetHost, language: row?.language ?? defaults.language };
+}
+
+function setTwitterPreferences(userId, targetHost, language) {
+  upsertTwitter.run(userId, targetHost, language);
+}
+
+function resetTwitterPreferences(userId) {
+  deleteTwitter.run(userId);
+}
 
 function requireTarget(id) {
   const target = targetsById.get(id);
@@ -66,4 +86,5 @@ function resetTarget(guildId, id) {
 module.exports = {
   targets: Object.freeze(targets), requireTarget, getMaster, getTarget, setMaster,
   toggleTarget: (guildId, id) => toggleTarget.immediate(guildId, id), resetTarget,
+  getTwitterPreferences, setTwitterPreferences, resetTwitterPreferences,
 };

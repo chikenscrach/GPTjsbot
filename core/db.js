@@ -40,6 +40,12 @@ db.exec(`
     PRIMARY KEY (guild_id, target)
   );
 
+  CREATE TABLE IF NOT EXISTS twitter_user_preferences (
+    user_id TEXT PRIMARY KEY,
+    target_host TEXT,
+    language TEXT
+  );
+
   -- 沿用舊表名以保留 Threads 紀錄，目前用於所有網址轉換訊息。
   CREATE TABLE IF NOT EXISTS threads_messages (
     message_id TEXT PRIMARY KEY,
