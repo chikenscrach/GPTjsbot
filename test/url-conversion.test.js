@@ -10,7 +10,7 @@ const { Collection, PermissionFlagsBits, PermissionsBitField, MessageFlags } = r
 
 const dir = mkdtempSync(join(tmpdir(), 'gptjsbot-url-conversion-'));
 const configPath = join(dir, 'settings.json');
-const config = { urlConversion: { rules: {
+const config = { urlConversion: { handlers: { twitter: { targetHost: 'fixupx.com', language: 'fr' } }, rules: {
   instagram: { targetHost: 'oginstagram.com' },
   custom: { hosts: ['source.example', 'm.source.example'], targetHost: 'preview.example' },
   hidden: { enabled: false, hosts: ['hidden.example'], targetHost: 'hidden-preview.example' },
@@ -24,6 +24,7 @@ process.env.SETTINGS_FILE = configPath;
 const db = require('../core/db');
 const settings = require('../core/url-settings');
 const command = require('../commands/url');
+const xtranslate = require('../commands/xtranslate');
 const simple = require('../handlers/simple');
 const threads = require('../handlers/threads');
 const event = require('../events/messageCreate');
@@ -35,12 +36,12 @@ after(() => {
 });
 
 let serial = 0;
-function source(content, guildId = `guild-${++serial}`) {
+function source(content, guildId = `guild-${++serial}`, userId = 'author') {
   const sent = [], suppressed = [];
   return {
     sent, suppressed,
     message: {
-      content, guildId, id: `source-${++serial}`, channelId: 'channel', author: { id: 'author', bot: false },
+      content, guildId, id: `source-${++serial}`, channelId: 'channel', author: { id: userId, bot: false },
       suppressEmbeds: async value => suppressed.push(value),
       channel: { send: async payload => {
         sent.push(payload);
@@ -65,6 +66,59 @@ function interaction({ guildId = `guild-${++serial}`, sub = 'status', target = n
     },
   };
 }
+
+test('X preferences follow the sender, keep the other option on edits, and reset to file defaults', async () => {
+  const guildId = 'translation-guild';
+  const userId = 'translation-user';
+  async function preference(sub, options = {}) {
+    const fixture = interaction({ guildId, sub, allowed: false });
+    fixture.value.client.commands.set('xtranslate', xtranslate);
+    fixture.value.commandName = 'xtranslate';
+    fixture.value.user = { id: userId };
+    fixture.value.options.getString = name => options[name] ?? null;
+    await handleCommandInteraction(fixture.value);
+    assert.equal(fixture.replies[0].flags, MessageFlags.Ephemeral);
+    return fixture.replies[0].content;
+  }
+  async function converted(input, author = userId, guild = guildId) {
+    const fixture = source(input, guild, author);
+    await event.execute(fixture.message);
+    return fixture.sent[0]?.content;
+  }
+
+  const tweet = 'https://x.com/alice/status/123?s=20';
+  assert.equal(xtranslate.data.toJSON().default_member_permissions, undefined);
+  assert.match(await preference('set', { language: 'zh-TW' }), /\/tw/);
+  assert.equal(await converted(tweet), 'https://fixupx.com/alice/status/123/tw');
+  assert.equal(await converted(tweet, 'another-user'), 'https://fixupx.com/alice/status/123/fr');
+  await preference('set', { provider: 'fixvx.com' });
+  assert.equal(await converted(tweet, userId, 'another-guild'), 'https://fixvx.com/alice/status/123/zh-hant');
+  assert.equal(await converted('https://WWW.TWITTER.COM/i/web/status/456/?s=1#part'),
+    'https://fixvx.com/i/web/status/456/zh-hant#part');
+  assert.equal(await converted('https://fixupx.com/alice/status/123/photo/2/?s=20#media'),
+    'https://fixupx.com/alice/status/123/photo/2/tw#media');
+  assert.equal(await converted('https://fixvx.com/alice/status/123/en'), undefined);
+  assert.equal(await converted('https://fixvx.com/alice/status/123/zh-hant'), undefined);
+  assert.equal(await converted('https://twitter.com/alice'), 'https://fixvx.com/alice');
+  const mixed = source(`${tweet} https://fixupx.com/bob/status/456/ja`, guildId, userId);
+  await event.execute(mixed.message);
+  assert.equal(mixed.sent[0].content, 'https://fixvx.com/alice/status/123/zh-hant');
+  assert.deepEqual(mixed.suppressed, []);
+
+  await preference('set', { language: 'en/path', provider: 'fixupx.com' });
+  await preference('set', { language: 'ja', provider: 'other.example' });
+  assert.match(await preference('status'), /fixvx\.com.*\/zh-hant/);
+  await preference('set', { language: 'ES-419' });
+  assert.equal(await converted(tweet), 'https://fixvx.com/alice/status/123/es-419');
+  await preference('set', { language: 'off' });
+  assert.equal(await converted(tweet), 'https://fixvx.com/alice/status/123');
+  assert.equal(await converted('https://fixupx.com/alice/status/123'), undefined);
+  await preference('reset');
+  assert.equal(await converted(tweet), 'https://fixupx.com/alice/status/123/fr');
+  settings.toggleTarget(guildId, 'twitter');
+  assert.equal(await converted(tweet), undefined);
+  assert.equal(await converted('https://fixvx.com/alice/status/123'), undefined);
+});
 
 test('changed and new domains convert without changing handler code, preserving URL structure', async () => {
   const cases = [
@@ -227,6 +281,7 @@ test('guild settings survive process restart, target URL changes, and default ch
   settings.toggleTarget(guildId, 'instagram');
   settings.toggleTarget(guildId, 'custom');
   settings.setMaster(guildId, false);
+  settings.setTwitterPreferences('restart-user', null, 'zh-hant');
   const changedFile = join(dir, 'changed.json');
   writeFileSync(changedFile, JSON.stringify({ urlConversion: { rules: {
     instagram: { targetHost: 'new-preview.example' },
@@ -239,6 +294,7 @@ test('guild settings survive process restart, target URL changes, and default ch
     const result = {
       master: settings.getMaster(id), instagram: settings.getTarget(id, 'instagram'),
       targetHost: settings.requireTarget('instagram').targetHost,
+      twitter: settings.getTwitterPreferences('restart-user'),
       newGuild: settings.getTarget('new-guild', 'custom'),
       reset: settings.resetTarget(id, 'custom'),
     };
@@ -251,6 +307,7 @@ test('guild settings survive process restart, target URL changes, and default ch
     master: { enabled: false, overridden: true },
     instagram: { enabled: false, overridden: true },
     targetHost: 'new-preview.example',
+    twitter: { targetHost: 'fixvx.com', language: 'zh-hant' },
     newGuild: { enabled: false, overridden: false },
     reset: { enabled: false, overridden: false },
   });

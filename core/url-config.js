@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { TWITTER_PROVIDERS, normalizeTwitterLanguage } = require('../utils/twitter');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const RESERVED_IDS = new Set(['simple', '__proto__', 'prototype', 'constructor']);
@@ -73,11 +74,19 @@ function mergeSettings(defaults, custom) {
   for (const id of new Set([...Object.keys(defaults.handlers), ...Object.keys(handlerInput)])) {
     validateId(id, 'urlConversion.handlers');
     const override = Object.hasOwn(handlerInput, id) ? handlerInput[id] : {};
-    keys(override, ['enabled'], `urlConversion.handlers.${id}`);
-    handlers[id] = Object.freeze({ enabled: boolean(
-      override.enabled === undefined ? (defaults.handlers[id]?.enabled ?? true) : override.enabled,
-      `urlConversion.handlers.${id}.enabled`,
-    ) });
+    const location = `urlConversion.handlers.${id}`;
+    keys(override, id === 'twitter' ? ['enabled', 'targetHost', 'language'] : ['enabled'], location);
+    const raw = { enabled: true, ...defaults.handlers[id], ...override };
+    const handler = { enabled: boolean(raw.enabled, `${location}.enabled`) };
+    if (id === 'twitter') {
+      handler.targetHost = domain(raw.targetHost, `${location}.targetHost`);
+      if (!TWITTER_PROVIDERS.includes(handler.targetHost)) {
+        throw new Error(`${location}.targetHost 必須是 ${TWITTER_PROVIDERS.join(' 或 ')}`);
+      }
+      handler.language = normalizeTwitterLanguage(raw.language);
+      if (!handler.language) throw new Error(`${location}.language 請填語言代碼或 off`);
+    }
+    handlers[id] = Object.freeze(handler);
   }
 
   const ruleInput = input.rules === undefined ? {} : object(input.rules, 'urlConversion.rules');

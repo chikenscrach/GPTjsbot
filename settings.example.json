@@ -2,7 +2,7 @@
   "urlConversion": {
     "enabled": true,
     "handlers": {
-      "twitter": { "enabled": true },
+      "twitter": { "enabled": true, "targetHost": "fixvx.com", "language": "off" },
       "facebook": { "enabled": true },
       "threads": { "enabled": true },
       "youtube": { "enabled": true }

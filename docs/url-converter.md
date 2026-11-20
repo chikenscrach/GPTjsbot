@@ -16,6 +16,21 @@ GPTjsbot 可把常見平台網址轉成更適合 Discord 預覽的網址，或�
 | Facebook | 專用 Handler 解析並使用替代預覽 |
 | YouTube | 專用 Handler 標準化短網址 |
 
+### X 貼文翻譯
+
+每位成員都可以用 `/xtranslate` 設定自己分享的貼文預覽。個人設定跨伺服器共用，依貼連結的人決定翻譯語言，同一則預覽對所有讀者顯示相同語言。內附預設使用 `fixvx.com` 並顯示原文。
+
+| 在 Discord 輸入 | 貼出 `https://x.com/alice/status/123` 後的預覽網址 |
+| --- | --- |
+| `/xtranslate set language:zh-TW provider:fixupx.com` | `https://fixupx.com/alice/status/123/tw` |
+| `/xtranslate set language:zh-TW provider:fixvx.com` | `https://fixvx.com/alice/status/123/zh-hant` |
+
+只改語言時可輸入 `/xtranslate set language:ja`。也可以手動輸入預覽服務支援的其他語言代碼，例如 `fr`。`/xtranslate set language:off` 關閉翻譯並保留已選的服務，`/xtranslate status` 查看目前設定，`/xtranslate reset` 恢復 Bot 預設值。
+
+直接分享 `fixupx.com` 或 `fixvx.com` 貼文時，會沿用該網址的服務。已指定語言的預覽連結保留原樣。伺服器的網址總開關與 `twitter` 平台開關皆適用。
+
+架設者可以在 `settings.json` 的 `urlConversion.handlers` 內設定預設值，例如 `"twitter": { "targetHost": "fixupx.com", "language": "zh-TW" }`。個人指令只覆寫有填寫的欄位。
+
 ### Threads 互動次數
 
 Threads 預覽會在 embed 底部依序顯示愛心、留言、轉發與分享次數，例如：

@@ -24,9 +24,22 @@ test('absent optional file preserves existing targets and an explicit missing fi
   const config = loadSettings({ settingsFile: '', projectRoot: dir });
   assert.equal(config.rules.instagram.targetHost, 'kkinstagram.com');
   assert.equal(config.rules.b23.targetHost, 'vxb23.tv');
+  assert.deepEqual(config.handlers.twitter, { enabled: true, targetHost: 'fixvx.com', language: 'off' });
   assert.equal(config.handlers.threads.enabled, true);
   assert.throws(() => loadSettings({ settingsFile: join(dir, 'missing.json') }), /ENOENT/);
   assert.throws(() => loadSettings({ settingsFile: dir }), /EISDIR/);
+});
+
+test('Twitter defaults accept legacy switches and normalize provider and language independently', () => {
+  const twitter = override => load({ urlConversion: { handlers: { twitter: override } } }).handlers.twitter;
+  assert.deepEqual(twitter({ enabled: false }), { enabled: false, targetHost: 'fixvx.com', language: 'off' });
+  assert.deepEqual(twitter({ targetHost: 'FIXUPX.COM', language: 'zh-TW' }),
+    { enabled: true, targetHost: 'fixupx.com', language: 'zh-hant' });
+  for (const alias of ['tw', 'zh-Hant']) assert.equal(twitter({ language: alias }).language, 'zh-hant');
+  assert.equal(twitter({ language: 'en' }).targetHost, 'fixvx.com');
+  for (const input of ['jp/test', 'en?x', '', false]) assert.throws(() => twitter({ language: input }), /twitter\.language/);
+  assert.throws(() => twitter({ targetHost: 'example.com' }), /twitter\.targetHost/);
+  assert.throws(() => load({ urlConversion: { handlers: { threads: { language: 'ja' } } } }), /threads\.language/);
 });
 
 test('partial overrides retain omitted defaults and new rules keep query parameters by default', () => {
